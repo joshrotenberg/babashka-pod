@@ -30,7 +30,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # A plain build catches features enabled only through dev-dependencies.
+      - name: build
+        run: cargo build --workspace
 
       - name: test
-        run: cargo test
+        run: cargo test --workspace

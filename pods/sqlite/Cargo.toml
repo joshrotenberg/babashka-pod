@@ -1,0 +1,12 @@
+[package]
+name = "pod-sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A babashka pod for SQLite, built on babashka-pod and rusqlite"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+babashka-pod = { path = "../.." }
+rusqlite = { version = "0.40", features = ["bundled", "csvtab"] }
