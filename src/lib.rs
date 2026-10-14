@@ -3,7 +3,8 @@
 //! A pod is a program that babashka starts with `babashka.pods/load-pod` and
 //! talks to over bencode messages. This crate implements the pod side of the
 //! protocol: `describe`, `invoke`, `load-ns` and `shutdown` over stdin/stdout
-//! or a localhost socket, with JSON payloads. You register namespaces and
+//! or a localhost socket, with JSON or [transit+json](transit) payloads
+//! ([`Format`]). You register namespaces and
 //! typed Rust functions; the runtime handles framing, concurrency, errors and
 //! shutdown.
 //!
@@ -45,9 +46,10 @@
 mod bencode;
 mod error;
 mod pod;
+pub mod transit;
 
 pub use error::{Error, PodError};
-pub use pod::{Emitter, Namespace, NoArgs, Pod, is_pod_mode};
+pub use pod::{Emitter, Format, Namespace, NoArgs, Pod, is_pod_mode};
 pub use serde_json;
 
 #[cfg(test)]

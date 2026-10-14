@@ -14,11 +14,50 @@ use serde::de::{self, Deserialize, DeserializeOwned, Deserializer, SeqAccess, Vi
 
 use crate::bencode::{self, Value};
 use crate::error::{Error, PodError};
+use crate::transit;
 
 /// How long in-flight calls get to finish after shutdown, by default.
 const DEFAULT_GRACE: Duration = Duration::from_secs(2);
 
-type Handler = Arc<dyn Fn(&str, Emitter) -> Result<Option<String>, PodError> + Send + Sync>;
+type Json = serde_json::Value;
+
+type Handler = Arc<dyn Fn(Json, Emitter) -> Result<Option<Json>, PodError> + Send + Sync>;
+
+/// The payload format: how arguments, return values and `ex-data` are
+/// encoded inside the bencode messages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Format {
+    /// JSON. babashka keywordizes map keys. Keywords, sets and insts sent by
+    /// babashka arrive as strings, arrays and strings.
+    #[default]
+    Json,
+    /// [Transit](crate::transit) over JSON: keywords, symbols, sets, insts,
+    /// uuids and tagged values survive the round trip in both directions.
+    TransitJson,
+}
+
+impl Format {
+    fn name(self) -> &'static str {
+        match self {
+            Format::Json => "json",
+            Format::TransitJson => "transit+json",
+        }
+    }
+
+    fn decode(self, text: &str) -> Result<Json, String> {
+        match self {
+            Format::Json => serde_json::from_str(text).map_err(|e| e.to_string()),
+            Format::TransitJson => transit::decode(text).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn encode(self, value: &Json) -> String {
+        match self {
+            Format::Json => transit::to_plain_json(value).to_string(),
+            Format::TransitJson => transit::encode(value),
+        }
+    }
+}
 
 /// Returns true when the process was started by babashka as a pod.
 ///
@@ -69,6 +108,7 @@ struct Var {
     meta: Option<String>,
     doc: Option<String>,
     arglists: Option<Vec<String>>,
+    arg_meta: bool,
     kind: VarKind,
 }
 
@@ -111,6 +151,11 @@ fn stream_wrapper_code(ns: &str, var: &Var, raw: &str) -> String {
         .map(|a| format!("\n  {{:arglists '({})}}", a.join(" ")))
         .unwrap_or_default();
     let name = &var.name;
+    let arg_meta = if var.arg_meta {
+        "\n                           :arg-meta true"
+    } else {
+        ""
+    };
     format!(
         r#"(defn {name}{doc}{attrs}
   [& args]
@@ -122,7 +167,7 @@ fn stream_wrapper_code(ns: &str, var: &Var, raw: &str) -> String {
     (babashka.pods/invoke "{ns}" '{ns}/{raw} (vec (butlast args))
                           {{:handlers {{:success callback
                                       :error (fn [e] (deliver result e))
-                                      :done (fn [] (deliver result nil))}}}})
+                                      :done (fn [] (deliver result nil))}}{arg_meta}}})
     (when-let [{{:keys [ex-message ex-data]}} @result]
       (throw (ex-info ex-message ex-data)))
     nil))"#
@@ -172,7 +217,7 @@ impl Namespace {
         let handler: Handler = Arc::new(move |args, _tx| {
             let args = decode_args(&qualified, args)?;
             let value = f(args)?;
-            serde_json::to_string(&value)
+            serde_json::to_value(&value)
                 .map(Some)
                 .map_err(PodError::from)
         });
@@ -226,6 +271,29 @@ impl Namespace {
     /// The code runs in this namespace, so it can call the pod's other vars.
     pub fn code(self, name: impl Into<String>, source: impl Into<String>) -> Self {
         self.push(name.into(), VarKind::Code(source.into()))
+    }
+
+    /// Asks babashka to send this var's arguments with their metadata.
+    ///
+    /// Only takes effect with [`Format::TransitJson`]. Arguments that carry
+    /// metadata arrive wrapped; take them as
+    /// [`transit::WithMeta<T>`](crate::transit::WithMeta). For a
+    /// [`stream_fn`](Self::stream_fn), the generated wrapper passes the flag
+    /// on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no var with this name has been registered yet, or if it is a
+    /// [`code`](Self::code) var.
+    pub fn arg_meta(mut self, name: &str) -> Self {
+        let ns = self.name.clone();
+        let var = self.var_mut(name, "arg_meta");
+        assert!(
+            !matches!(var.kind, VarKind::Code(_)),
+            "arg_meta for {ns}/{name}: code vars are not invoked through the pod"
+        );
+        var.arg_meta = true;
+        self
     }
 
     /// Sets a var's docstring. The crate escapes it.
@@ -312,6 +380,7 @@ impl Namespace {
             meta: None,
             doc: None,
             arglists: None,
+            arg_meta: false,
             kind,
         });
         self
@@ -329,7 +398,11 @@ impl Namespace {
                             "code",
                             Value::from(stream_wrapper_code(&self.name, var, raw)),
                         )),
-                        VarKind::Handler(_) => {}
+                        VarKind::Handler(_) => {
+                            if var.arg_meta {
+                                pairs.push(("arg-meta", Value::from("true")));
+                            }
+                        }
                     }
                     if let Some(meta) = var.meta_edn() {
                         pairs.push(("meta", Value::from(meta)));
@@ -341,8 +414,8 @@ impl Namespace {
     }
 }
 
-fn decode_args<A: DeserializeOwned>(var: &str, args: &str) -> Result<A, PodError> {
-    serde_json::from_str(args).map_err(|e| {
+fn decode_args<A: DeserializeOwned>(var: &str, args: Json) -> Result<A, PodError> {
+    serde_json::from_value(args.clone()).map_err(|e| {
         PodError::new(format!("invalid arguments for {var}: {e}"))
             .with_data(serde_json::json!({ "var": var, "args": args }))
     })
@@ -352,6 +425,7 @@ fn decode_args<A: DeserializeOwned>(var: &str, args: &str) -> Result<A, PodError
 pub struct Pod {
     namespaces: Vec<Namespace>,
     grace: Duration,
+    format: Format,
 }
 
 impl Default for Pod {
@@ -361,12 +435,20 @@ impl Default for Pod {
 }
 
 impl Pod {
-    /// Creates a pod with no namespaces. Payloads are JSON.
+    /// Creates a pod with no namespaces. Payloads are JSON until
+    /// [`format`](Self::format) says otherwise.
     pub fn new() -> Self {
         Pod {
             namespaces: Vec::new(),
             grace: DEFAULT_GRACE,
+            format: Format::Json,
         }
+    }
+
+    /// Sets the payload format. Defaults to [`Format::Json`].
+    pub fn format(mut self, format: Format) -> Self {
+        self.format = format;
+        self
     }
 
     /// Adds a namespace.
@@ -419,7 +501,7 @@ impl Pod {
         R: Read,
         W: Write + Send + 'static,
     {
-        let shared = Arc::new(Shared::new(Box::new(writer)));
+        let shared = Arc::new(Shared::new(Box::new(writer), self.format));
         let handlers = self.handlers();
         let mut reader = BufReader::new(reader);
 
@@ -444,6 +526,7 @@ impl Pod {
                         shared.write(&error_reply(
                             id,
                             &PodError::new(format!("unknown op: {op}")),
+                            self.format,
                         ));
                     }
                 }
@@ -489,7 +572,7 @@ impl Pod {
             })
             .collect();
         Value::dict([
-            ("format", Value::from("json")),
+            ("format", Value::from(self.format.name())),
             ("namespaces", Value::List(namespaces)),
             (
                 "ops",
@@ -507,7 +590,11 @@ impl Pod {
                 ("name", Value::from(name)),
                 ("vars", ns.describe_vars()),
             ]),
-            None => error_reply(id, &PodError::new(format!("unknown namespace: {name}"))),
+            None => error_reply(
+                id,
+                &PodError::new(format!("unknown namespace: {name}")),
+                self.format,
+            ),
         }
     }
 }
@@ -515,13 +602,23 @@ impl Pod {
 fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value) {
     let id = msg.get_str("id").unwrap_or_default().to_string();
     let var = msg.get_str("var").unwrap_or_default().to_string();
-    let args = msg.get_str("args").unwrap_or("[]").to_string();
+    let raw_args = msg.get_str("args").unwrap_or("[]");
+    let format = shared.format;
 
     let Some(handler) = handlers.get(&var).cloned() else {
         let err = PodError::new(format!("unknown var: {var}"))
             .with_data(serde_json::json!({ "var": var }));
-        shared.write(&error_reply(&id, &err));
+        shared.write(&error_reply(&id, &err, format));
         return;
+    };
+    let args = match format.decode(raw_args) {
+        Ok(args) => args,
+        Err(e) => {
+            let err = PodError::new(format!("invalid arguments for {var}: {e}"))
+                .with_data(serde_json::json!({ "var": var, "args": raw_args }));
+            shared.write(&error_reply(&id, &err, format));
+            return;
+        }
     };
 
     shared.begin();
@@ -529,25 +626,29 @@ fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value
     let spawned = thread::Builder::new()
         .name(format!("pod:{var}"))
         .spawn(move || {
-            let outcome = catch_unwind(AssertUnwindSafe(|| handler(&args, tx.clone())));
+            let outcome = catch_unwind(AssertUnwindSafe(|| handler(args, tx.clone())));
             let reply = match outcome {
                 Ok(Ok(Some(value))) => Value::dict([
                     ("id", Value::from(tx.id.as_str())),
-                    ("value", Value::from(value)),
+                    ("value", Value::from(format.encode(&value))),
                     ("status", Value::List(vec!["done".into()])),
                 ]),
                 Ok(Ok(None)) => Value::dict([
                     ("id", Value::from(tx.id.as_str())),
                     ("status", Value::List(vec!["done".into()])),
                 ]),
-                Ok(Err(e)) => error_reply(&tx.id, &e),
+                Ok(Err(e)) => error_reply(&tx.id, &e, format),
                 Err(panic) => {
                     let detail = panic
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "unknown panic".to_string());
-                    error_reply(&tx.id, &PodError::new(format!("{var} panicked: {detail}")))
+                    error_reply(
+                        &tx.id,
+                        &PodError::new(format!("{var} panicked: {detail}")),
+                        format,
+                    )
                 }
             };
             tx.finish(&reply);
@@ -559,15 +660,13 @@ fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value
             "could not start a thread for {}: {e}",
             msg.get_str("var").unwrap_or_default()
         ));
-        shared.write(&error_reply(&id, &err));
+        shared.write(&error_reply(&id, &err, format));
     }
 }
 
-fn error_reply(id: &str, err: &PodError) -> Value {
-    let data = err
-        .data()
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| "{}".to_string());
+fn error_reply(id: &str, err: &PodError, format: Format) -> Value {
+    let empty = serde_json::json!({});
+    let data = format.encode(err.data().unwrap_or(&empty));
     Value::dict([
         ("id", Value::from(id)),
         ("status", Value::List(vec!["done".into(), "error".into()])),
@@ -601,10 +700,10 @@ impl Emitter {
     ///
     /// Fails once the call has finished or the client has gone away.
     pub fn send<T: Serialize + ?Sized>(&self, value: &T) -> Result<(), PodError> {
-        let json = serde_json::to_string(value)?;
+        let encoded = self.shared.format.encode(&serde_json::to_value(value)?);
         self.emit(Value::dict([
             ("id", Value::from(self.id.as_str())),
-            ("value", Value::from(json)),
+            ("value", Value::from(encoded)),
         ]))
     }
 
@@ -669,6 +768,7 @@ struct State {
 }
 
 struct Shared {
+    format: Format,
     writer: Mutex<Box<dyn Write + Send>>,
     closed: AtomicBool,
     state: Mutex<State>,
@@ -676,8 +776,9 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(writer: Box<dyn Write + Send>) -> Self {
+    fn new(writer: Box<dyn Write + Send>, format: Format) -> Self {
         Shared {
+            format,
             writer: Mutex::new(writer),
             closed: AtomicBool::new(false),
             state: Mutex::new(State {

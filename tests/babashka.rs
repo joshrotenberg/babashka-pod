@@ -1,20 +1,23 @@
-//! Runs `examples/example.bb` against the example pod with a real babashka.
-//! Skipped when `bb` is not on PATH, unless `REQUIRE_BB` is set (CI sets it).
+//! Runs the example bb scripts against the example pods with a real
+//! babashka, over both transports. Skipped when `bb` is not on PATH, unless
+//! `REQUIRE_BB` is set (CI sets it).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-fn example_pod() -> PathBuf {
+fn example_binary(name: &str) -> PathBuf {
     // cargo test builds examples into target/<profile>/examples, next to the
     // deps directory holding this test binary.
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap();
     profile_dir
         .join("examples")
-        .join(format!("example_pod{}", std::env::consts::EXE_SUFFIX))
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn run_example(args: &[&str]) -> Option<String> {
+/// Runs `examples/<script>` with the `<pod>` example binary passed in the
+/// `<env>` variable.
+fn run_script(script: &str, pod: &str, env: &str, args: &[&str]) -> Option<String> {
     let bb_found = Command::new("bb").arg("--version").output().is_ok();
     if !bb_found {
         // CI sets REQUIRE_BB so a missing bb fails the run instead of
@@ -26,12 +29,12 @@ fn run_example(args: &[&str]) -> Option<String> {
         eprintln!("bb not found on PATH, skipping");
         return None;
     }
-    let pod = example_pod();
+    let pod = example_binary(pod);
     assert!(pod.exists(), "example pod not built at {}", pod.display());
     let output = Command::new("bb")
-        .arg("examples/example.bb")
+        .arg(format!("examples/{script}"))
         .args(args)
-        .env("EXAMPLE_POD", &pod)
+        .env(env, &pod)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();
@@ -42,6 +45,14 @@ fn run_example(args: &[&str]) -> Option<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(stdout)
+}
+
+fn run_example(args: &[&str]) -> Option<String> {
+    run_script("example.bb", "example_pod", "EXAMPLE_POD", args)
+}
+
+fn run_transit(args: &[&str]) -> Option<String> {
+    run_script("transit.bb", "transit_pod", "TRANSIT_POD", args)
 }
 
 fn check(stdout: &str) {
@@ -77,5 +88,39 @@ fn socket_transport() {
     if let Some(out) = run_example(&["socket"]) {
         assert!(out.contains("transport: :socket"));
         check(&out);
+    }
+}
+
+fn check_transit(stdout: &str) {
+    for expected in [
+        "tag-set is a set of keywords: true",
+        "kw-info: {:kw :my.ns/thing, :name \"thing\", :ns \"my.ns\"}",
+        "plus-days: #inst \"2026-10-15T00:00:00.000-00:00\" java.util.Date",
+        "point: {:x 3, :y 4}",
+        "meta-of: {:source \"repl\"}",
+        "meta-of plain: nil",
+        "fail: failed on purpose {:kind :boom}",
+        "ticks: [:tick/0 :tick/1 :tick/2]",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn transit_stdio_transport() {
+    if let Some(out) = run_transit(&[]) {
+        assert!(out.contains("transport: :stdio"));
+        check_transit(&out);
+    }
+}
+
+#[test]
+fn transit_socket_transport() {
+    if let Some(out) = run_transit(&["socket"]) {
+        assert!(out.contains("transport: :socket"));
+        check_transit(&out);
     }
 }

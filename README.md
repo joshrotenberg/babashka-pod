@@ -3,7 +3,7 @@
 A Rust library for writing [babashka pods](https://github.com/babashka/pods).
 
 The crate implements the pod side of the protocol: `describe`, `invoke`, `load-ns` and
-`shutdown`, over stdin/stdout or a localhost socket, with JSON payloads. You register namespaces
+`shutdown`, over stdin/stdout or a localhost socket, with JSON or transit+json payloads. You register namespaces
 and typed Rust functions; the runtime handles bencode framing, concurrency, error replies and
 shutdown.
 
@@ -48,12 +48,47 @@ fn main() -> Result<(), babashka_pod::Error> {
 | `meta(name, edn)` | any var metadata, as a raw EDN map | Does not mix with `doc`/`arglists` on the same var (EDN rejects duplicate keys); registering both panics. |
 | `Namespace::deferred()` | namespace loaded on first `require` | Served through the `load-ns` op. |
 
-JSON object keys arrive in babashka as keywords.
+Map keys arrive in babashka as keywords in both formats.
+
+## Payload formats
+
+| | `Format::Json` (default) | `Format::TransitJson` |
+|---|---|---|
+| Choose with | nothing | `Pod::new().format(Format::TransitJson)` |
+| Keywords, symbols from bb | strings | strings (`:a` becomes `"a"`, `:ns/a` becomes `"ns/a"`) |
+| Sets, lists from bb | arrays | arrays |
+| `#inst` from bb | string | epoch millis (`transit::Inst`) |
+| Values to bb | plain JSON | keywords, symbols, sets, insts, uuids, and tagged values via the `transit` types |
+| `arg-meta` | not available | `Namespace::arg_meta(name)`; take the argument as `transit::WithMeta<T>` |
+
+Arguments decode into `serde_json::Value` first, so handlers keep using ordinary serde types in
+either format. To send a Clojure type back, return one of the `babashka_pod::transit` types:
+
+| Rust | babashka |
+|---|---|
+| `Keyword::new("a")`, `Keyword::new("ns/a")` | `:a`, `:ns/a` |
+| `Symbol::new("f")` | `f` |
+| `Set(vec![...])` | `#{...}` |
+| `Inst(millis)` | `#inst "..."` |
+| `Uuid(string)` | `#uuid "..."` |
+| `Tagged { tag, rep }` | whatever a read handler registered with `babashka.pods/add-transit-read-handler!` makes of it |
+| `WithMeta { value, meta }` | `value` with metadata |
+
+Under `Format::Json` these types degrade to plain JSON (a keyword to its name, a set to an array,
+an inst to millis). Values handled as an untyped `serde_json::Value` lose keyword-ness on the way
+back: a keyword that arrived as `"a"` returns as the string `"a"`.
+
+The transit codec (`src/transit.rs`) depends only on serde and serde_json. It reads babashka's
+transit writer output, including the key and tag cache.
+
+`examples/transit_pod.rs` and `examples/transit.bb` cover each type, a custom tag with a read
+handler registered from the pod's `code`, `arg-meta`, keyword `ex-data`, and a stream of keywords.
 
 ## Errors
 
 A handler that returns `Err(PodError)` produces an error reply, which babashka raises as
-`ex-info`. `PodError::with_data` sets `ex-data`. Any `std::error::Error` converts into `PodError`,
+`ex-info`. `PodError::with_data` sets `ex-data`, encoded in the pod's format (so transit types
+work there too). For argument decoding failures, `ex-data` holds `:var` and the decoded `:args`. Any `std::error::Error` converts into `PodError`,
 so `?` works in handlers. Argument decoding failures, unknown vars and handler panics are also
 returned as error replies, and the pod keeps serving.
 
@@ -86,18 +121,19 @@ the runtime in memory.
 ## Example
 
 ```bash
-cargo build --example example_pod
-bb examples/example.bb
+cargo build --examples
+bb examples/example.bb             # JSON
 bb examples/example.bb socket
+bb examples/transit.bb             # transit+json
+bb examples/transit.bb socket
 ```
 
-`tests/babashka.rs` runs the same script against both transports when `bb` is on `PATH`.
+`tests/babashka.rs` runs both scripts against both transports when `bb` is on `PATH`.
 
 ## Not yet supported
 
-- EDN and transit+json payload formats.
+- The EDN payload format, and `readers`, which the pod protocol defines for EDN only.
 - Async (tokio) handlers.
-- `readers`, `arg-meta` and dynamic metadata, which depend on EDN or transit.
 
 ## License
 
