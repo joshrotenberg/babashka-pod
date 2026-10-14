@@ -8,11 +8,11 @@
 //! - [`decode`] reads what babashka's transit writer produces, including the
 //!   read cache. Keywords and symbols decode to strings, sets and lists to
 //!   arrays, insts to epoch milliseconds, so they deserialize into plain Rust
-//!   types. `with-meta` and unknown tags decode to marker objects that
-//!   [`WithMeta`] and [`Tagged`] deserialize from.
+//!   types. Byte arrays, `with-meta` and unknown tags decode to marker
+//!   objects that [`Bytes`], [`WithMeta`] and [`Tagged`] deserialize from.
 //! - [`encode`] writes a value. Maps are written with keyword keys, matching
 //!   the JSON format, where babashka keywordizes keys. The [`Keyword`],
-//!   [`Symbol`], [`Set`], [`Inst`], [`Uuid`], [`Tagged`] and [`WithMeta`]
+//!   [`Symbol`], [`Set`], [`Inst`], [`Uuid`], [`Bytes`], [`Tagged`] and [`WithMeta`]
 //!   types serialize to marker objects that `encode` writes as the
 //!   corresponding transit values.
 //!
@@ -250,7 +250,9 @@ fn scalar(raw: &str) -> Result<Value, DecodeError> {
     let bad = || DecodeError(format!("bad transit scalar {raw:?}"));
     Ok(match kind {
         '~' | '^' | '`' => Value::String(raw[1..].to_string()),
-        ':' | '$' | 'u' | 'b' | 'r' | 'c' | 'n' | 'f' | 't' => Value::String(body.to_string()),
+        ':' | '$' | 'u' | 'r' | 'c' | 'n' | 'f' | 't' => Value::String(body.to_string()),
+        // Kept as a marker so a blob is not mistaken for text.
+        'b' => marker("bytes", vec![Value::String(body.to_string())]),
         'm' => Value::from(body.parse::<i64>().map_err(|_| bad())?),
         'i' => match (body.parse::<i64>(), body.parse::<u64>()) {
             (Ok(n), _) => Value::from(n),
@@ -324,6 +326,7 @@ fn encode_marker(kind: &str, args: &[Value]) -> Value {
         "keyword" => Value::String(format!("~:{}", text(0))),
         "symbol" => Value::String(format!("~${}", text(0))),
         "uuid" => Value::String(format!("~u{}", text(0))),
+        "bytes" => Value::String(format!("~b{}", text(0))),
         "inst" => Value::String(format!(
             "~m{}",
             args.first().and_then(Value::as_i64).unwrap_or_default()
@@ -339,8 +342,8 @@ fn encode_marker(kind: &str, args: &[Value]) -> Value {
 }
 
 /// Rewrites marker objects as plain JSON, for pods that use the JSON format:
-/// keywords, symbols and uuids become strings, sets become arrays, insts
-/// become epoch milliseconds, tagged values become `{"tag": .., "rep": ..}`,
+/// keywords, symbols and uuids become strings, bytes become base64 strings,
+/// sets become arrays, insts become epoch milliseconds, tagged values become `{"tag": .., "rep": ..}`,
 /// and `with-meta` drops the metadata.
 pub fn to_plain_json(v: &Value) -> Value {
     match v {
@@ -506,6 +509,85 @@ impl<'de> Deserialize<'de> for Uuid {
     }
 }
 
+/// A byte array: a BLOB, a file's contents. babashka sees a `byte[]`.
+///
+/// Travels as base64 (transit `~b`, or a plain base64 string under the JSON
+/// format).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Bytes(pub Vec<u8>);
+
+impl Bytes {
+    /// Reads bytes from a decoded argument that may hold them, for handlers
+    /// that take untyped `serde_json::Value` arguments. Only the transit byte
+    /// marker matches; a plain string is left as text.
+    pub fn from_json(v: &Value) -> Option<Bytes> {
+        match v.as_object().and_then(as_marker) {
+            Some(("bytes", [Value::String(b64)])) => base64_decode(b64).map(Bytes),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for Bytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("bytes", base64_encode(&self.0)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        let b64 = match (&v, v.as_object().and_then(as_marker)) {
+            (_, Some(("bytes", [Value::String(b64)]))) => b64.as_str(),
+            (Value::String(b64), _) => b64.as_str(),
+            _ => return Err(de::Error::custom(format!("expected bytes, got {v}"))),
+        };
+        base64_decode(b64)
+            .map(Bytes)
+            .ok_or_else(|| de::Error::custom("invalid base64"))
+    }
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim_end_matches('=');
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for c in text.bytes() {
+        let v = B64.iter().position(|&b| b == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// A transit tagged value with a tag the decoder does not know, or one to
 /// send to babashka, where a read handler registered with
 /// `babashka.pods/add-transit-read-handler!` turns it into a value.
@@ -666,6 +748,53 @@ mod tests {
         assert!(decode("not json").is_err());
         assert!(decode(r#"["^5"]"#).is_err(), "reference to an empty cache");
         assert!(decode(r#"["^ ","~:a"]"#).is_err(), "odd map");
+    }
+
+    #[test]
+    fn bytes_round_trip_with_bb_fixtures() {
+        // As bb writes [(.getBytes "hi!") (byte-array [0 255 16]) (byte-array [])].
+        let v = decode(r#"["~baGkh","~bAP8Q","~b"]"#).unwrap();
+        let bytes: Vec<Bytes> = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(
+            bytes,
+            [
+                Bytes(b"hi!".to_vec()),
+                Bytes(vec![0, 255, 16]),
+                Bytes(vec![])
+            ]
+        );
+        assert_eq!(Bytes::from_json(&v[1]), Some(Bytes(vec![0, 255, 16])));
+        assert_eq!(
+            Bytes::from_json(&json!("aGkh")),
+            None,
+            "plain text stays text"
+        );
+        assert_eq!(
+            encode(&serde_json::to_value(&bytes).unwrap()),
+            r#"["~baGkh","~bAP8Q","~b"]"#
+        );
+        assert_eq!(
+            to_plain_json(&serde_json::to_value(&bytes).unwrap()),
+            json!(["aGkh", "AP8Q", ""])
+        );
+        let from_json_format: Bytes = serde_json::from_value(json!("AP8Q")).unwrap();
+        assert_eq!(from_json_format, Bytes(vec![0, 255, 16]));
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        for (raw, b64) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"\xff\xfe\x00", "//4A"),
+        ] {
+            assert_eq!(base64_encode(raw), b64);
+            assert_eq!(base64_decode(b64).unwrap(), raw);
+        }
+        assert_eq!(base64_decode("not base64!"), None);
     }
 
     #[test]

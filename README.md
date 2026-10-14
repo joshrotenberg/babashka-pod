@@ -153,6 +153,14 @@ bb examples/transit.bb socket
 - The EDN payload format, and `readers`, which the pod protocol defines for EDN only.
 - Async (tokio) handlers.
 
+## Pods built with this crate
+
+| Pod | Path |
+|---|---|
+| SQLite, on rusqlite with bundled SQLite | [`pods/sqlite`](pods/sqlite/README.md) |
+
+They are workspace members with `publish = false`; `cargo test --workspace` runs their bb tests.
+
 ## License
 
 MIT OR Apache-2.0
