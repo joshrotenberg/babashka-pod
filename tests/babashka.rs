@@ -1,5 +1,5 @@
 //! Runs `examples/example.bb` against the example pod with a real babashka.
-//! Skipped when `bb` is not on PATH.
+//! Skipped when `bb` is not on PATH, unless `REQUIRE_BB` is set (CI sets it).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -17,6 +17,12 @@ fn example_pod() -> PathBuf {
 fn run_example(args: &[&str]) -> Option<String> {
     let bb_found = Command::new("bb").arg("--version").output().is_ok();
     if !bb_found {
+        // CI sets REQUIRE_BB so a missing bb fails the run instead of
+        // passing it silently.
+        assert!(
+            std::env::var_os("REQUIRE_BB").is_none(),
+            "bb not found on PATH and REQUIRE_BB is set"
+        );
         eprintln!("bb not found on PATH, skipping");
         return None;
     }
