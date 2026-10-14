@@ -45,10 +45,12 @@
 
 mod bencode;
 mod error;
+mod handles;
 mod pod;
 pub mod transit;
 
 pub use error::{Error, PodError};
+pub use handles::{Handle, Handles};
 pub use pod::{Emitter, Format, Namespace, NoArgs, Pod, is_pod_mode};
 pub use serde_json;
 

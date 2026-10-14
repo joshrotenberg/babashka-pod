@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use babashka_pod::serde_json::json;
-use babashka_pod::{Emitter, Namespace, Pod, PodError};
+use babashka_pod::{Emitter, Handle, Handles, Namespace, Pod, PodError};
 
 const NS: &str = "pod.joshrotenberg.example";
 
@@ -13,6 +13,10 @@ fn main() {
         eprintln!("this is a babashka pod; load it with babashka.pods/load-pod");
         std::process::exit(2);
     }
+
+    // State kept between calls: babashka holds handles, the pod holds values.
+    let counters: Handles<i64> = Handles::new("counter");
+    let (c1, c2, c3) = (counters.clone(), counters.clone(), counters);
 
     let ns = Namespace::new(NS)
         .function("add", |nums: Vec<f64>| {
@@ -46,7 +50,23 @@ fn main() {
             "count-up",
             "Streams the integers from 0 below n from the pod, calling f with each.",
         )
-        .arglists("count-up", ["[n f]"]);
+        .arglists("count-up", ["[n f]"])
+        .function("counter", move |(start,): (i64,)| {
+            Ok::<_, PodError>(c1.insert(start))
+        })
+        .doc(
+            "counter",
+            "Creates a counter in the pod and returns its handle.",
+        )
+        .function("inc!", move |(h,): (Handle,)| {
+            c2.with(&h, |n| {
+                *n += 1;
+                Ok(*n)
+            })
+        })
+        .doc("inc!", "Increments a counter and returns the new value.")
+        .function("close!", move |(h,): (Handle,)| c3.remove(&h))
+        .doc("close!", "Removes a counter.");
 
     if let Err(e) = Pod::new().namespace(ns).run() {
         eprintln!("example_pod: {e}");

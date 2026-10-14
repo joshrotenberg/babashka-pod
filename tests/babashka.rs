@@ -66,6 +66,9 @@ fn check(stdout: &str) {
         "stream doc: Streams the integers from 0 below n from the pod, calling f with each.",
         "stream error: invalid arguments for pod.joshrotenberg.example/count-up*",
         "no callback: the last argument to pod.joshrotenberg.example/count-up must be a callback fn",
+        "counter: {:handle \"counter\", :id 1}",
+        "inc!: 12",
+        "closed: unknown or closed counter handle 1 {:handle \"counter\", :id 1}",
         "bad args: invalid arguments for pod.joshrotenberg.example/add",
     ] {
         assert!(
