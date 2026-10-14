@@ -84,6 +84,24 @@ transit writer output, including the key and tag cache.
 `examples/transit_pod.rs` and `examples/transit.bb` cover each type, a custom tag with a read
 handler registered from the pod's `code`, `arg-meta`, keyword `ex-data`, and a stream of keywords.
 
+## State between calls
+
+`Handles<T>` keeps values in the pod (connections, prepared statements, compiled queries) and
+gives babashka a `Handle`, which it sees as `{:handle "connection", :id 1}` and passes back as an
+argument. Clone the registry into each handler that needs it.
+
+```rust
+let conns: Handles<Connection> = Handles::new("connection");
+let (open, query) = (conns.clone(), conns.clone());
+Namespace::new("pod.example.db")
+    .function("open", move |(path,): (String,)| Ok::<_, PodError>(open.insert(connect(&path)?)))
+    .function("query", move |(h, sql): (Handle, String)| query.with(&h, |c| run(c, &sql)));
+```
+
+`with` locks only the value it runs on, so calls on different handles run concurrently. A handle of
+another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
+when `Pod::run` returns and the handlers holding the registry are dropped.
+
 ## Errors
 
 A handler that returns `Err(PodError)` produces an error reply, which babashka raises as

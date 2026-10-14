@@ -39,6 +39,16 @@
   (catch clojure.lang.ExceptionInfo e
     (println "no callback:" (ex-message e))))
 
+(let [c (ex/counter 10)]
+  (println "counter:" (pr-str c))
+  (ex/inc! c)
+  (println "inc!:" (ex/inc! c))
+  (ex/close! c)
+  (try
+    (ex/inc! c)
+    (catch clojure.lang.ExceptionInfo e
+      (println "closed:" (ex-message e) (pr-str (ex-data e))))))
+
 (try
   (ex/add "x")
   (catch clojure.lang.ExceptionInfo e
