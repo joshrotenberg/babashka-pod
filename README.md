@@ -15,8 +15,9 @@ fn main() -> Result<(), babashka_pod::Error> {
         .namespace(
             Namespace::new("pod.example.math")
                 .function("add", |(a, b): (i64, i64)| Ok::<_, PodError>(a + b))
-                .meta("add", r#"{:doc "Adds two integers" :arglists ([a b])}"#)
-                .stream("count-up*", |(n,): (u64,), tx: Emitter| {
+                .doc("add", "Adds two integers")
+                .arglists("add", ["[a b]"])
+                .stream_fn("count-up", |(n,): (u64,), tx: Emitter| {
                     for i in 0..n {
                         tx.send(&i)?;
                     }
@@ -32,6 +33,7 @@ fn main() -> Result<(), babashka_pod::Error> {
 (pods/load-pod ["./my-pod"])
 (require '[pod.example.math :as math])
 (math/add 1 2) ;; => 3
+(math/count-up 3 println) ;; prints 0, 1, 2 and returns nil
 ```
 
 ## Registering vars
@@ -39,9 +41,11 @@ fn main() -> Result<(), babashka_pod::Error> {
 | Method | Client sees | Notes |
 |---|---|---|
 | `function(name, Fn(A) -> Result<R, PodError>)` | a function returning one value | `A` is deserialized from the argument vector: `(T,)` for one argument, `(T, U)` for two, `NoArgs` for none, `Vec<T>` for variadic. `R` is serialized as JSON. |
-| `stream(name, Fn(A, Emitter) -> Result<(), PodError>)` | values delivered to `:success` handlers | Use with client `code` that calls `babashka.pods/invoke` with `:handlers`. `Emitter` can be cloned and moved to other threads. |
+| `stream_fn(name, Fn(A, Emitter) -> Result<(), PodError>)` | `(name arg ... callback)`: calls `callback` with each value, blocks until done, returns `nil`, rethrows pod errors as `ex-info` | Registers the raw var `name*` plus a `name` var whose client code the crate generates. `Emitter` can be cloned and moved to other threads. |
+| `stream(name, Fn(A, Emitter) -> Result<(), PodError>)` | values delivered to `:success` handlers | The raw form: pair it with client `code` that calls `babashka.pods/invoke` with `:handlers`. |
 | `code(name, source)` | a var defined by Clojure code evaluated in babashka | For idiomatic wrappers around raw pod functions. |
-| `meta(name, edn)` | var metadata such as `:doc` and `:arglists` | |
+| `doc(name, text)`, `arglists(name, ["[a b]", ...])` | `:doc` and `:arglists` metadata | Escaped by the crate. On a `stream_fn` they go into the generated `defn`. |
+| `meta(name, edn)` | any var metadata, as a raw EDN map | Does not mix with `doc`/`arglists` on the same var (EDN rejects duplicate keys); registering both panics. |
 | `Namespace::deferred()` | namespace loaded on first `require` | Served through the `load-ns` op. |
 
 JSON object keys arrive in babashka as keywords.
