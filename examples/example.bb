@@ -29,6 +29,16 @@
   (ex/count-up 5 #(swap! seen conj %))
   (println "count-up:" @seen))
 
+(println "stream doc:" (:doc (meta #'ex/count-up)))
+(try
+  (ex/count-up "x" identity)
+  (catch clojure.lang.ExceptionInfo e
+    (println "stream error:" (ex-message e))))
+(try
+  (ex/count-up 3)
+  (catch clojure.lang.ExceptionInfo e
+    (println "no callback:" (ex-message e))))
+
 (try
   (ex/add "x")
   (catch clojure.lang.ExceptionInfo e

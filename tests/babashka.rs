@@ -52,6 +52,9 @@ fn check(stdout: &str) {
         "divide: 3",
         "divide error: divide by zero {:a 1, :b 0}",
         "count-up: [0 1 2 3 4]",
+        "stream doc: Streams the integers from 0 below n from the pod, calling f with each.",
+        "stream error: invalid arguments for pod.joshrotenberg.example/count-up*",
+        "no callback: the last argument to pod.joshrotenberg.example/count-up must be a callback fn",
         "bad args: invalid arguments for pod.joshrotenberg.example/add",
     ] {
         assert!(

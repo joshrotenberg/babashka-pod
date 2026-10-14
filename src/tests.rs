@@ -361,3 +361,120 @@ fn duplicate_vars_panic() {
         .function("a", |_: NoArgs| Ok::<_, PodError>(1))
         .code("a", "(defn a [] 2)");
 }
+
+fn described_vars(ns: Namespace) -> Vec<Value> {
+    let (result, out) = run(
+        Pod::new().namespace(ns),
+        &[msg(&[("op", "describe"), ("id", "0")])],
+    );
+    result.unwrap();
+    let Some(Value::List(nss)) = out[0].get("namespaces") else {
+        panic!("no namespaces")
+    };
+    let Some(Value::List(vars)) = nss[0].get("vars") else {
+        panic!("no vars")
+    };
+    vars.clone()
+}
+
+#[test]
+fn doc_and_arglists_become_escaped_edn_meta() {
+    let vars = described_vars(
+        Namespace::new("pod.test.meta")
+            .function("f", |(_x,): (i64,)| Ok::<_, PodError>(1))
+            .doc("f", r#"Say "hi" \ bye"#)
+            .arglists("f", ["[x]", "[x & more]"]),
+    );
+    assert_eq!(
+        vars[0].get_str("meta"),
+        Some(r#"{:doc "Say \"hi\" \\ bye" :arglists ([x] [x & more])}"#)
+    );
+}
+
+#[test]
+fn stream_fn_registers_raw_var_and_generated_wrapper() {
+    let vars = described_vars(
+        Namespace::new("pod.test.s")
+            .stream_fn("nums", |(n,): (u64,), tx: Emitter| {
+                for i in 0..n {
+                    tx.send(&i)?;
+                }
+                Ok(())
+            })
+            .doc("nums", "Streams \"n\" numbers.")
+            .arglists("nums", ["[n f]"]),
+    );
+    let names: Vec<_> = vars.iter().filter_map(|v| v.get_str("name")).collect();
+    assert_eq!(names, ["nums*", "nums"]);
+
+    // The raw var is a plain handler: no code, no meta.
+    assert!(vars[0].get("code").is_none());
+    assert!(vars[0].get("meta").is_none());
+
+    // The wrapper carries doc and arglists in its code, not in meta, because
+    // the client ignores metadata on code vars.
+    assert!(vars[1].get("meta").is_none());
+    let code = vars[1].get_str("code").unwrap();
+    assert!(
+        code.starts_with("(defn nums\n  \"Streams \\\"n\\\" numbers.\"\n  {:arglists '([n f])}")
+    );
+    assert!(
+        code.contains(
+            r#"(babashka.pods/invoke "pod.test.s" 'pod.test.s/nums* (vec (butlast args))"#
+        )
+    );
+    assert!(code.contains("(throw (ex-info ex-message ex-data))"));
+}
+
+#[test]
+fn stream_fn_raw_var_streams_values() {
+    let pod = Pod::new().namespace(Namespace::new("pod.test.s").stream_fn(
+        "nums",
+        |(n,): (u64,), tx: Emitter| {
+            for i in 0..n {
+                tx.send(&i)?;
+            }
+            Ok(())
+        },
+    ));
+    let (result, out) = run(pod, &[invoke("1", "pod.test.s/nums*", "[3]")]);
+    result.unwrap();
+    let values: Vec<_> = replies(&out, "1")
+        .iter()
+        .filter_map(|m| m.get_str("value"))
+        .collect();
+    assert_eq!(values, ["0", "1", "2"]);
+    assert_eq!(status(replies(&out, "1").last().unwrap()), ["done"]);
+}
+
+#[test]
+#[should_panic(expected = "ignores metadata on code vars")]
+fn doc_on_code_var_panics() {
+    let _ = Namespace::new("pod.test.p")
+        .code("c", "(defn c [] 1)")
+        .doc("c", "nope");
+}
+
+#[test]
+#[should_panic(expected = "already has raw meta")]
+fn doc_after_raw_meta_panics() {
+    let _ = Namespace::new("pod.test.p")
+        .function("f", |_: NoArgs| Ok::<_, PodError>(1))
+        .meta("f", "{:doc \"x\"}")
+        .doc("f", "y");
+}
+
+#[test]
+#[should_panic(expected = "already has doc or arglists")]
+fn raw_meta_after_doc_panics() {
+    let _ = Namespace::new("pod.test.p")
+        .function("f", |_: NoArgs| Ok::<_, PodError>(1))
+        .arglists("f", ["[]"])
+        .meta("f", "{:doc \"x\"}");
+}
+
+#[test]
+#[should_panic(expected = "doc for unknown var")]
+fn doc_for_unknown_var_panics() {
+    let _ = Namespace::new("pod.test.p").doc("missing", "x");
+}
