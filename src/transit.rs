@@ -1,0 +1,769 @@
+//! The `transit+json` payload format.
+//!
+//! [Transit](https://github.com/cognitect/transit-format) encodes Clojure
+//! values in JSON: keywords, symbols, sets, insts and tagged values that plain
+//! JSON cannot express. This module translates between transit+json text and
+//! [`serde_json::Value`], so handlers keep using ordinary serde types.
+//!
+//! - [`decode`] reads what babashka's transit writer produces, including the
+//!   read cache. Keywords and symbols decode to strings, sets and lists to
+//!   arrays, insts to epoch milliseconds, so they deserialize into plain Rust
+//!   types. `with-meta` and unknown tags decode to marker objects that
+//!   [`WithMeta`] and [`Tagged`] deserialize from.
+//! - [`encode`] writes a value. Maps are written with keyword keys, matching
+//!   the JSON format, where babashka keywordizes keys. The [`Keyword`],
+//!   [`Symbol`], [`Set`], [`Inst`], [`Uuid`], [`Tagged`] and [`WithMeta`]
+//!   types serialize to marker objects that `encode` writes as the
+//!   corresponding transit values.
+//!
+//! The module depends only on serde and serde_json.
+
+use std::fmt;
+
+use serde::de::{self, DeserializeOwned, Deserializer};
+use serde::ser::{SerializeMap, Serializer};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Number, Value};
+
+/// Key of the single-entry object that marks a transit value inside a
+/// `serde_json::Value`. The NUL byte keeps it from colliding with real keys.
+const MARKER: &str = "\u{0}transit";
+
+/// Entries in the read cache before it wraps around (44 * 44).
+const CACHE_SIZE: usize = 1936;
+
+/// Integers outside this range are written as `~i` strings, as the transit
+/// spec requires for JSON.
+const MAX_JSON_INT: u64 = 1 << 53;
+
+/// A transit decoding error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeError(String);
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid transit: {}", self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+// ---------------------------------------------------------------------------
+// Decoding
+// ---------------------------------------------------------------------------
+
+/// Decodes transit+json text into a `serde_json::Value`.
+pub fn decode(text: &str) -> Result<Value, DecodeError> {
+    let json: Value = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
+    let mut reader = Reader {
+        cache: Vec::new(),
+        next: 0,
+    };
+    reader.value(&json)
+}
+
+struct Reader {
+    cache: Vec<String>,
+    next: usize,
+}
+
+impl Reader {
+    /// Resolves a cache reference, or records a cacheable string, and returns
+    /// the encoded string itself.
+    fn resolve(&mut self, s: &str, as_key: bool) -> Result<String, DecodeError> {
+        if s.starts_with('^') && s != "^ " {
+            let index = cache_index(&s[1..])
+                .ok_or_else(|| DecodeError(format!("bad cache reference {s:?}")))?;
+            return self
+                .cache
+                .get(index)
+                .cloned()
+                .ok_or_else(|| DecodeError(format!("cache reference {s:?} not seen yet")));
+        }
+        if is_cacheable(s, as_key) {
+            if self.next == CACHE_SIZE {
+                self.next = 0;
+            }
+            if self.next < self.cache.len() {
+                self.cache[self.next] = s.to_string();
+            } else {
+                self.cache.push(s.to_string());
+            }
+            self.next += 1;
+        }
+        Ok(s.to_string())
+    }
+
+    fn value(&mut self, v: &Value) -> Result<Value, DecodeError> {
+        match v {
+            Value::String(s) => {
+                let raw = self.resolve(s, false)?;
+                scalar(&raw)
+            }
+            Value::Array(items) => self.array(items),
+            Value::Object(obj) => self.verbose_map(obj),
+            other => Ok(other.clone()),
+        }
+    }
+
+    fn array(&mut self, items: &[Value]) -> Result<Value, DecodeError> {
+        let Some(Value::String(first)) = items.first() else {
+            return items.iter().map(|v| self.value(v)).collect();
+        };
+        let head = self.resolve(first, false)?;
+        if head == "^ " {
+            let rest = &items[1..];
+            if rest.len() % 2 != 0 {
+                return Err(DecodeError("map with an odd number of entries".into()));
+            }
+            let mut map = Map::new();
+            for pair in rest.chunks(2) {
+                let key = self.key(&pair[0])?;
+                let value = self.value(&pair[1])?;
+                map.insert(key, value);
+            }
+            return Ok(Value::Object(map));
+        }
+        if let Some(tag) = head.strip_prefix("~#") {
+            if items.len() != 2 {
+                return Err(DecodeError(format!("tag {tag} without exactly one value")));
+            }
+            return self.tagged(tag, &items[1]);
+        }
+        let mut out = vec![scalar(&head)?];
+        for v in &items[1..] {
+            out.push(self.value(v)?);
+        }
+        Ok(Value::Array(out))
+    }
+
+    /// A map written as a JSON object (transit's verbose mode), or a verbose
+    /// tagged value `{"~#tag": rep}`.
+    fn verbose_map(&mut self, obj: &Map<String, Value>) -> Result<Value, DecodeError> {
+        if obj.len() == 1 {
+            let (k, v) = obj.iter().next().unwrap();
+            if let Some(tag) = k.strip_prefix("~#") {
+                return self.tagged(tag, v);
+            }
+        }
+        let mut map = Map::new();
+        for (k, v) in obj {
+            let key = self.key(&Value::String(k.clone()))?;
+            map.insert(key, self.value(v)?);
+        }
+        Ok(Value::Object(map))
+    }
+
+    fn key(&mut self, k: &Value) -> Result<String, DecodeError> {
+        let decoded = match k {
+            Value::String(s) => {
+                let raw = self.resolve(s, true)?;
+                scalar(&raw)?
+            }
+            other => self.value(other)?,
+        };
+        Ok(match decoded {
+            Value::String(s) => s,
+            other => other.to_string(),
+        })
+    }
+
+    fn tagged(&mut self, tag: &str, rep: &Value) -> Result<Value, DecodeError> {
+        match tag {
+            "set" | "list" => match self.value(rep)? {
+                arr @ Value::Array(_) => Ok(arr),
+                other => Err(DecodeError(format!("{tag} of a non-array: {other}"))),
+            },
+            // A map whose keys are not all strings: decoded to [[k v] ...].
+            "cmap" => {
+                let Value::Array(flat) = self.value(rep)? else {
+                    return Err(DecodeError("cmap of a non-array".into()));
+                };
+                Ok(Value::Array(
+                    flat.chunks(2).map(|kv| Value::Array(kv.to_vec())).collect(),
+                ))
+            }
+            "with-meta" => {
+                let Value::Array(pair) = self.value(rep)? else {
+                    return Err(DecodeError("with-meta of a non-array".into()));
+                };
+                let [value, meta] = <[Value; 2]>::try_from(pair)
+                    .map_err(|_| DecodeError("with-meta needs [value meta]".into()))?;
+                Ok(marker("with-meta", vec![value, meta]))
+            }
+            "ratio" => {
+                let Value::Array(nd) = self.value(rep)? else {
+                    return Err(DecodeError("ratio of a non-array".into()));
+                };
+                let (n, d) = match nd.as_slice() {
+                    [n, d] => (as_f64(n), as_f64(d)),
+                    _ => (None, None),
+                };
+                match (n, d) {
+                    (Some(n), Some(d)) => Ok(Number::from_f64(n / d)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)),
+                    _ => Err(DecodeError("ratio needs [numerator denominator]".into())),
+                }
+            }
+            "'" => self.value(rep),
+            other => {
+                let rep = self.value(rep)?;
+                Ok(marker("tagged", vec![Value::from(other), rep]))
+            }
+        }
+    }
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn is_cacheable(s: &str, as_key: bool) -> bool {
+    s.len() > 3 && (as_key || s.starts_with("~:") || s.starts_with("~$") || s.starts_with("~#"))
+}
+
+/// Cache codes are one or two base-44 digits starting at `'0'`.
+fn cache_index(code: &str) -> Option<usize> {
+    let digit = |b: u8| (48..48 + 44).contains(&b).then(|| (b - 48) as usize);
+    match code.as_bytes() {
+        [a] => digit(*a),
+        [a, b] => Some(digit(*a)? * 44 + digit(*b)?),
+        _ => None,
+    }
+}
+
+/// Decodes a non-cache transit string.
+fn scalar(raw: &str) -> Result<Value, DecodeError> {
+    let mut chars = raw.chars();
+    if chars.next() != Some('~') {
+        return Ok(Value::String(raw.to_string()));
+    }
+    let Some(kind) = chars.next() else {
+        return Ok(Value::String(raw.to_string()));
+    };
+    let body = &raw[2..];
+    let bad = || DecodeError(format!("bad transit scalar {raw:?}"));
+    Ok(match kind {
+        '~' | '^' | '`' => Value::String(raw[1..].to_string()),
+        ':' | '$' | 'u' | 'b' | 'r' | 'c' | 'n' | 'f' | 't' => Value::String(body.to_string()),
+        'm' => Value::from(body.parse::<i64>().map_err(|_| bad())?),
+        'i' => match (body.parse::<i64>(), body.parse::<u64>()) {
+            (Ok(n), _) => Value::from(n),
+            (_, Ok(n)) => Value::from(n),
+            _ => Value::String(body.to_string()),
+        },
+        'd' => body
+            .parse::<f64>()
+            .ok()
+            .and_then(Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(bad)?,
+        '?' => match body {
+            "t" => Value::Bool(true),
+            "f" => Value::Bool(false),
+            _ => return Err(bad()),
+        },
+        '_' => Value::Null,
+        // NaN and infinities have no JSON number form.
+        'z' => Value::String(body.to_string()),
+        _ => Value::String(raw.to_string()),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Encoding
+// ---------------------------------------------------------------------------
+
+/// Encodes a `serde_json::Value`, including marker objects from this
+/// module's types, as transit+json text.
+pub fn encode(v: &Value) -> String {
+    encode_value(v).to_string()
+}
+
+fn encode_value(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(escape(s)),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) if i.unsigned_abs() > MAX_JSON_INT => Value::String(format!("~i{i}")),
+            (None, Some(u)) if u > MAX_JSON_INT => Value::String(format!("~i{u}")),
+            _ => v.clone(),
+        },
+        Value::Array(items) => Value::Array(items.iter().map(encode_value).collect()),
+        Value::Object(obj) => match as_marker(obj) {
+            Some((kind, args)) => encode_marker(kind, args),
+            None => {
+                let mut out = vec![Value::from("^ ")];
+                for (k, v) in obj {
+                    out.push(Value::String(format!("~:{k}")));
+                    out.push(encode_value(v));
+                }
+                Value::Array(out)
+            }
+        },
+        other => other.clone(),
+    }
+}
+
+fn escape(s: &str) -> String {
+    if s.starts_with(['~', '^', '`']) {
+        format!("~{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+fn encode_marker(kind: &str, args: &[Value]) -> Value {
+    let text = |i: usize| args.get(i).and_then(Value::as_str).unwrap_or_default();
+    let tagged = |tag: &str, rep: Value| Value::Array(vec![Value::String(format!("~#{tag}")), rep]);
+    match kind {
+        "keyword" => Value::String(format!("~:{}", text(0))),
+        "symbol" => Value::String(format!("~${}", text(0))),
+        "uuid" => Value::String(format!("~u{}", text(0))),
+        "inst" => Value::String(format!(
+            "~m{}",
+            args.first().and_then(Value::as_i64).unwrap_or_default()
+        )),
+        "set" => tagged("set", encode_value(args.first().unwrap_or(&Value::Null))),
+        "tagged" => tagged(text(0), encode_value(args.get(1).unwrap_or(&Value::Null))),
+        "with-meta" => tagged(
+            "with-meta",
+            Value::Array(args.iter().take(2).map(encode_value).collect()),
+        ),
+        _ => Value::Null,
+    }
+}
+
+/// Rewrites marker objects as plain JSON, for pods that use the JSON format:
+/// keywords, symbols and uuids become strings, sets become arrays, insts
+/// become epoch milliseconds, tagged values become `{"tag": .., "rep": ..}`,
+/// and `with-meta` drops the metadata.
+pub fn to_plain_json(v: &Value) -> Value {
+    match v {
+        Value::Array(items) => Value::Array(items.iter().map(to_plain_json).collect()),
+        Value::Object(obj) => match as_marker(obj) {
+            Some((kind, args)) => {
+                let arg = |i: usize| args.get(i).map(to_plain_json).unwrap_or(Value::Null);
+                match kind {
+                    "tagged" => serde_json::json!({ "tag": arg(0), "rep": arg(1) }),
+                    _ => arg(0),
+                }
+            }
+            None => Value::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), to_plain_json(v)))
+                    .collect(),
+            ),
+        },
+        other => other.clone(),
+    }
+}
+
+fn marker(kind: &str, args: Vec<Value>) -> Value {
+    let mut items = vec![Value::from(kind)];
+    items.extend(args);
+    let mut map = Map::new();
+    map.insert(MARKER.to_string(), Value::Array(items));
+    Value::Object(map)
+}
+
+fn as_marker(obj: &Map<String, Value>) -> Option<(&str, &[Value])> {
+    if obj.len() != 1 {
+        return None;
+    }
+    let Value::Array(items) = obj.get(MARKER)? else {
+        return None;
+    };
+    let (kind, args) = items.split_first()?;
+    Some((kind.as_str()?, args))
+}
+
+// ---------------------------------------------------------------------------
+// Value types
+// ---------------------------------------------------------------------------
+
+/// Serializes `{MARKER: [kind, args...]}`. `items` is a tuple whose first
+/// element is the kind, so it serializes as one array.
+fn serialize_marker<S: Serializer, T: Serialize>(s: S, items: &T) -> Result<S::Ok, S::Error> {
+    let mut map = s.serialize_map(Some(1))?;
+    map.serialize_entry(MARKER, items)?;
+    map.end()
+}
+
+/// A Clojure keyword. The name has no leading colon: `Keyword::new("a")` is
+/// `:a`, `Keyword::new("ns/a")` is `:ns/a`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Keyword(pub String);
+
+impl Keyword {
+    /// Creates a keyword from its name, without the colon.
+    pub fn new(name: impl Into<String>) -> Self {
+        Keyword(name.into())
+    }
+}
+
+impl Serialize for Keyword {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("keyword", &self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Keyword {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(|s| Keyword(s.strip_prefix(':').unwrap_or(&s).to_string()))
+    }
+}
+
+/// A Clojure symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Symbol(pub String);
+
+impl Symbol {
+    /// Creates a symbol from its name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Symbol(name.into())
+    }
+}
+
+impl Serialize for Symbol {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("symbol", &self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Symbol {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(Symbol)
+    }
+}
+
+/// A Clojure set. Order is not significant; the elements are kept as given.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Set<T>(pub Vec<T>);
+
+impl<T: Serialize> Serialize for Set<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("set", &self.0))
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Set<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::deserialize(d).map(Set)
+    }
+}
+
+impl<T> FromIterator<T> for Set<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Set(iter.into_iter().collect())
+    }
+}
+
+/// A point in time (`#inst`), as milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Inst(pub i64);
+
+impl Inst {
+    /// The current time.
+    pub fn now() -> Self {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        Inst(millis)
+    }
+}
+
+impl Serialize for Inst {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("inst", self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Inst {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        i64::deserialize(d).map(Inst)
+    }
+}
+
+/// A UUID (`#uuid`), in its canonical string form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Uuid(pub String);
+
+impl Serialize for Uuid {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("uuid", &self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Uuid {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(Uuid)
+    }
+}
+
+/// A transit tagged value with a tag the decoder does not know, or one to
+/// send to babashka, where a read handler registered with
+/// `babashka.pods/add-transit-read-handler!` turns it into a value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tagged {
+    /// The tag, without `~#`.
+    pub tag: String,
+    /// The value's representation.
+    pub rep: Value,
+}
+
+impl Serialize for Tagged {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("tagged", &self.tag, &self.rep))
+    }
+}
+
+impl<'de> Deserialize<'de> for Tagged {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        match v.as_object().and_then(as_marker) {
+            Some(("tagged", [Value::String(tag), rep])) => Ok(Tagged {
+                tag: tag.clone(),
+                rep: rep.clone(),
+            }),
+            _ => Err(de::Error::custom(format!(
+                "expected a tagged value, got {v}"
+            ))),
+        }
+    }
+}
+
+/// A value with optional metadata.
+///
+/// For a var registered with [`Namespace::arg_meta`](crate::Namespace::arg_meta),
+/// babashka sends arguments that carry metadata wrapped in `with-meta`; use
+/// `WithMeta<T>` for such an argument. Arguments without metadata arrive
+/// plain and get `meta: None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithMeta<T> {
+    /// The value.
+    pub value: T,
+    /// Its metadata map, if it had any.
+    pub meta: Option<Value>,
+}
+
+impl<T: Serialize> Serialize for WithMeta<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match &self.meta {
+            Some(meta) => serialize_marker(s, &("with-meta", &self.value, meta)),
+            None => self.value.serialize(s),
+        }
+    }
+}
+
+impl<'de, T: DeserializeOwned> Deserialize<'de> for WithMeta<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        if let Some(("with-meta", [value, meta])) = v.as_object().and_then(as_marker) {
+            let value = serde_json::from_value(value.clone()).map_err(de::Error::custom)?;
+            return Ok(WithMeta {
+                value,
+                meta: Some(meta.clone()),
+            });
+        }
+        let value = serde_json::from_value(v).map_err(de::Error::custom)?;
+        Ok(WithMeta { value, meta: None })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Inputs below were produced by babashka's cognitect transit writer.
+
+    #[test]
+    fn decodes_scalars_keywords_and_maps() {
+        assert_eq!(
+            decode(r#"[1,"two","~:three"]"#).unwrap(),
+            json!([1, "two", "three"])
+        );
+        assert_eq!(
+            decode(r#"["^ ","~:a",1,"~:b","x"]"#).unwrap(),
+            json!({"a": 1, "b": "x"})
+        );
+        assert_eq!(
+            decode(r#"["^ ","str-key",1]"#).unwrap(),
+            json!({"str-key": 1})
+        );
+    }
+
+    #[test]
+    fn decodes_cache_references_for_keys_and_tags() {
+        let text = r#"[["^ ","~:name","a","~:tags",["~#set",["~:y","~:x"]]],["^ ","^0","b","^1",["^2",["~:x"]]]]"#;
+        assert_eq!(
+            decode(text).unwrap(),
+            json!([{"name": "a", "tags": ["y", "x"]}, {"name": "b", "tags": ["x"]}])
+        );
+    }
+
+    #[test]
+    fn decodes_insts_uuids_symbols_and_escapes() {
+        assert_eq!(
+            decode(r#"["~m1791936000000","~u550e8400-e29b-41d4-a716-446655440000","~$sym","~$ns/sym","~:ns/kw"]"#).unwrap(),
+            json!([1791936000000_i64, "550e8400-e29b-41d4-a716-446655440000", "sym", "ns/sym", "ns/kw"])
+        );
+        assert_eq!(
+            decode(r#"["~~tilde","~^caret","~`tick",null,true,2.5,"~i9007199254740993"]"#).unwrap(),
+            json!([
+                "~tilde",
+                "^caret",
+                "`tick",
+                null,
+                true,
+                2.5,
+                9007199254740993_u64
+            ])
+        );
+    }
+
+    #[test]
+    fn decodes_lists_composite_maps_and_with_meta() {
+        assert_eq!(decode(r#"["~#list",[1,2]]"#).unwrap(), json!([1, 2]));
+        assert_eq!(
+            decode(r#"["~#cmap",[[1,2],"~:composite"]]"#).unwrap(),
+            json!([[[1, 2], "composite"]])
+        );
+        let v = decode(r#"[["~#with-meta",[["^ ","~:a",1],["^ ","~:tag","~:x"]]],2]"#).unwrap();
+        let (first, second): (WithMeta<Value>, WithMeta<i64>) = serde_json::from_value(v).unwrap();
+        assert_eq!(first.value, json!({"a": 1}));
+        assert_eq!(first.meta, Some(json!({"tag": "x"})));
+        assert_eq!(
+            second,
+            WithMeta {
+                value: 2,
+                meta: None
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_tags_decode_to_tagged() {
+        let v = decode(r#"["~#point",[1,2]]"#).unwrap();
+        let t: Tagged = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            t,
+            Tagged {
+                tag: "point".into(),
+                rep: json!([1, 2])
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(decode("not json").is_err());
+        assert!(decode(r#"["^5"]"#).is_err(), "reference to an empty cache");
+        assert!(decode(r#"["^ ","~:a"]"#).is_err(), "odd map");
+    }
+
+    #[test]
+    fn cache_codes_are_base_44() {
+        assert_eq!(cache_index("0"), Some(0));
+        assert_eq!(cache_index("1"), Some(1));
+        assert_eq!(cache_index("10"), Some(44));
+        assert_eq!(cache_index("[["), Some(43 * 44 + 43));
+        assert_eq!(cache_index(""), None);
+    }
+
+    #[test]
+    fn cache_wraps_after_1936_entries() {
+        // 1937 distinct cacheable keywords, then a reference to slot 0, which
+        // now holds the 1937th.
+        let mut items: Vec<String> = (0..1937).map(|i| format!("\"~:k{i:04}\"")).collect();
+        items.push("\"^0\"".to_string());
+        let v = decode(&format!("[{}]", items.join(","))).unwrap();
+        assert_eq!(v[1937], json!("k1936"));
+    }
+
+    #[test]
+    fn encodes_maps_with_keyword_keys_and_escapes_strings() {
+        assert_eq!(encode(&json!({"a": 1})), r#"["^ ","~:a",1]"#);
+        assert_eq!(
+            encode(&json!(["~x", "^y", "`z", "plain"])),
+            r#"["~~x","~^y","~`z","plain"]"#
+        );
+        assert_eq!(
+            encode(&json!(9007199254740993_u64)),
+            r#""~i9007199254740993""#
+        );
+        assert_eq!(
+            encode(&json!(-9007199254740993_i64)),
+            r#""~i-9007199254740993""#
+        );
+        assert_eq!(encode(&json!(9007199254740992_u64)), "9007199254740992");
+    }
+
+    #[test]
+    fn encodes_value_types() {
+        let v = serde_json::to_value((
+            Keyword::new("a"),
+            Symbol::new("ns/f"),
+            Set(vec![Keyword::new("x"), Keyword::new("y")]),
+            Inst(1791936000000),
+            Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            Tagged {
+                tag: "point".into(),
+                rep: json!([1, 2]),
+            },
+            WithMeta {
+                value: json!([1]),
+                meta: Some(json!({"k": 1})),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            encode(&v),
+            concat!(
+                r#"["~:a","~$ns/f",["~#set",["~:x","~:y"]],"~m1791936000000","#,
+                r#""~u550e8400-e29b-41d4-a716-446655440000",["~#point",[1,2]],"#,
+                r#"["~#with-meta",[[1],["^ ","~:k",1]]]]"#
+            )
+        );
+    }
+
+    #[test]
+    fn round_trips_through_plain_values() {
+        let v = serde_json::to_value(json!({
+            "name": "a",
+            "tags": Set(vec![Keyword::new("x")]),
+            "at": Inst(5),
+            "nested": [{"deep": "~escaped"}],
+        }))
+        .unwrap();
+        assert_eq!(decode(&encode(&v)).unwrap(), to_plain_json(&v));
+    }
+
+    #[test]
+    fn plain_json_drops_markers() {
+        let v = serde_json::to_value((
+            Keyword::new("a"),
+            Set(vec![1, 2]),
+            Inst(5),
+            Tagged {
+                tag: "t".into(),
+                rep: json!(1),
+            },
+            WithMeta {
+                value: 3,
+                meta: Some(json!({})),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            to_plain_json(&v),
+            json!(["a", [1, 2], 5, {"tag": "t", "rep": 1}, 3])
+        );
+    }
+}

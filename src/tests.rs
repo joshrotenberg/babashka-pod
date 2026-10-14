@@ -193,7 +193,8 @@ fn bad_arguments_and_unknown_vars_are_errors() {
             .unwrap()
             .starts_with("invalid arguments for pod.test.math/add")
     );
-    assert_eq!(json_of(r, "ex-data")["args"], "[1]");
+    // ex-data :args is the decoded argument vector, not the raw payload.
+    assert_eq!(json_of(r, "ex-data")["args"], json!([1]));
     assert_eq!(status(replies(&out, "2")[0]), ["done", "error"]);
     let r = replies(&out, "3")[0];
     assert_eq!(
@@ -477,4 +478,78 @@ fn raw_meta_after_doc_panics() {
 #[should_panic(expected = "doc for unknown var")]
 fn doc_for_unknown_var_panics() {
     let _ = Namespace::new("pod.test.p").doc("missing", "x");
+}
+
+#[test]
+fn transit_format_round_trips_through_the_runtime() {
+    use crate::Format;
+    use crate::transit::{Keyword, Set};
+    let pod = Pod::new().format(Format::TransitJson).namespace(
+        Namespace::new("pod.test.t")
+            .function("tags", |(tags,): (Vec<Keyword>,)| {
+                Ok::<_, PodError>(Set(tags))
+            })
+            .function("fail", |_: NoArgs| {
+                Err::<i64, _>(PodError::new("no").with_data(json!({"kind": Keyword::new("k")})))
+            })
+            .arg_meta("tags"),
+    );
+    let (result, out) = run(
+        pod,
+        &[
+            msg(&[("op", "describe"), ("id", "0")]),
+            // As babashka writes [[:a :b]].
+            invoke("1", "pod.test.t/tags", r#"[["~:a","~:b"]]"#),
+            invoke("2", "pod.test.t/fail", "[]"),
+            invoke("3", "pod.test.t/tags", "not transit"),
+        ],
+    );
+    result.unwrap();
+    let d = &out[0];
+    assert_eq!(d.get_str("format"), Some("transit+json"));
+    let Some(Value::List(nss)) = d.get("namespaces") else {
+        panic!("no namespaces")
+    };
+    let Some(Value::List(vars)) = nss[0].get("vars") else {
+        panic!("no vars")
+    };
+    assert_eq!(vars[0].get_str("arg-meta"), Some("true"));
+    assert!(vars[1].get("arg-meta").is_none());
+
+    assert_eq!(
+        replies(&out, "1")[0].get_str("value"),
+        Some(r#"["~#set",["~:a","~:b"]]"#)
+    );
+    assert_eq!(
+        replies(&out, "2")[0].get_str("ex-data"),
+        Some(r#"["^ ","~:kind","~:k"]"#)
+    );
+    let r = replies(&out, "3")[0];
+    assert_eq!(status(r), ["done", "error"]);
+    assert!(r.get_str("ex-message").unwrap().contains("invalid transit"));
+}
+
+#[test]
+fn json_format_writes_transit_types_as_plain_json() {
+    use crate::transit::{Inst, Keyword, Set};
+    let pod = Pod::new().namespace(Namespace::new("pod.test.j").function("v", |_: NoArgs| {
+        Ok::<_, PodError>((Keyword::new("a"), Set(vec![1]), Inst(5)))
+    }));
+    let (result, out) = run(pod, &[invoke("1", "pod.test.j/v", "[]")]);
+    result.unwrap();
+    assert_eq!(
+        replies(&out, "1")[0].get_str("value"),
+        Some(r#"["a",[1],5]"#)
+    );
+}
+
+#[test]
+fn stream_fn_wrapper_passes_arg_meta() {
+    let vars = described_vars(
+        Namespace::new("pod.test.am")
+            .stream_fn("s", |_: NoArgs, _tx: Emitter| Ok(()))
+            .arg_meta("s"),
+    );
+    let code = vars[1].get_str("code").unwrap();
+    assert!(code.contains(":arg-meta true"), "{code}");
 }
