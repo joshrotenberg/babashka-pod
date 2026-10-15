@@ -102,6 +102,10 @@ Namespace::new("pod.example.db")
 another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
 when `Pod::run` returns and the handlers holding the registry are dropped.
 
+A pod that has to match an existing client API with another shape, such as `{:watcher/id 1}`, can
+return its own value built from `h.id` and rebuild the handle with `Handles::handle(id)`, which
+uses the registry's kind. The `Handles` docs have an example.
+
 ## Errors
 
 A handler that returns `Err(PodError)` produces an error reply, which babashka raises as

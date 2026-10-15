@@ -56,6 +56,34 @@ impl fmt::Display for Handle {
 /// Values are dropped when they are [`remove`](Self::remove)d or when the
 /// last clone of the registry is dropped. Handler closures own their clones,
 /// so that happens when [`Pod::run`](crate::Pod::run) returns.
+///
+/// # Matching an existing handle shape
+///
+/// A [`Handle`] reaches babashka as `{:handle kind :id n}`. A pod that has to
+/// match an existing client API with another shape can return its own value
+/// built from [`Handle::id`], and rebuild the handle from the id on the way
+/// back with [`handle`](Self::handle):
+///
+/// ```
+/// use babashka_pod::{Handles, Namespace, PodError};
+/// use babashka_pod::serde_json::{Value, json};
+///
+/// struct Watch;
+///
+/// let watches: Handles<Watch> = Handles::new("watcher");
+/// let (w1, w2) = (watches.clone(), watches.clone());
+/// let ns = Namespace::new("pod.example.watch")
+///     // babashka sees {:watcher/id 1}
+///     .function("watch", move |(_path,): (String,)| {
+///         Ok::<_, PodError>(json!({ "watcher/id": w1.insert(Watch).id }))
+///     })
+///     .function("unwatch", move |(w,): (Value,)| {
+///         let id = w["watcher/id"]
+///             .as_u64()
+///             .ok_or_else(|| PodError::new("expected {:watcher/id n}"))?;
+///         w2.remove(&w2.handle(id))
+///     });
+/// ```
 pub struct Handles<T> {
     inner: Arc<Inner<T>>,
 }
@@ -96,6 +124,19 @@ impl<T> Handles<T> {
     pub fn insert(&self, value: T) -> Handle {
         let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
         self.values().insert(id, Arc::new(Mutex::new(value)));
+        Handle {
+            handle: self.inner.kind.clone(),
+            id,
+        }
+    }
+
+    /// Builds a handle of this registry's kind for `id`.
+    ///
+    /// For pods that give babashka their own shape instead of a [`Handle`]
+    /// (see [Matching an existing handle shape](Handles#matching-an-existing-handle-shape))
+    /// and need the handle back from an id. It does not check that `id` is
+    /// stored; [`with`](Self::with) and [`remove`](Self::remove) do.
+    pub fn handle(&self, id: u64) -> Handle {
         Handle {
             handle: self.inner.kind.clone(),
             id,
@@ -203,6 +244,16 @@ mod tests {
         let err = h.with(&a, |_| Ok(())).unwrap_err();
         assert_eq!(err.message(), "unknown or closed list handle 1");
         assert!(h.remove(&a).is_err());
+    }
+
+    #[test]
+    fn handle_rebuilds_from_an_id() {
+        let h: Handles<i32> = Handles::new("watcher");
+        let a = h.insert(5);
+        assert_eq!(h.handle(a.id), a);
+        assert_eq!(h.with(&h.handle(a.id), |n| Ok(*n)).unwrap(), 5);
+        let err = h.with(&h.handle(99), |_| Ok(())).unwrap_err();
+        assert_eq!(err.message(), "unknown or closed watcher handle 99");
     }
 
     #[test]
