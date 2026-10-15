@@ -98,13 +98,13 @@ Namespace::new("pod.example.db")
     .function("query", move |(h, sql): (Handle, String)| query.with(&h, |c| run(c, &sql)));
 ```
 
-`with` locks only the value it runs on, so calls on different handles run concurrently. A handle of
-another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
-when `Pod::run` returns and the handlers holding the registry are dropped.
-
 A pod that has to match an existing client API with another shape, such as `{:watcher/id 1}`, can
 return its own value built from `h.id` and rebuild the handle with `Handles::handle(id)`, which
 uses the registry's kind. The `Handles` docs have an example.
+
+`with` locks only the value it runs on, so calls on different handles run concurrently. A handle of
+another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
+when `Pod::run` returns and the handlers holding the registry are dropped.
 
 ## Errors
 

@@ -247,16 +247,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_rebuilds_from_an_id() {
-        let h: Handles<i32> = Handles::new("watcher");
-        let a = h.insert(5);
-        assert_eq!(h.handle(a.id), a);
-        assert_eq!(h.with(&h.handle(a.id), |n| Ok(*n)).unwrap(), 5);
-        let err = h.with(&h.handle(99), |_| Ok(())).unwrap_err();
-        assert_eq!(err.message(), "unknown or closed watcher handle 99");
-    }
-
-    #[test]
     fn wrong_kind_is_an_error() {
         let conns: Handles<()> = Handles::new("connection");
         let stmts: Handles<()> = Handles::new("statement");
@@ -327,5 +317,15 @@ mod tests {
         let back: Handle =
             serde_json::from_value(crate::transit::decode(&transit).unwrap()).unwrap();
         assert_eq!(back, h);
+    }
+
+    #[test]
+    fn handle_rebuilds_from_an_id() {
+        let h: Handles<i32> = Handles::new("watcher");
+        let a = h.insert(5);
+        assert_eq!(h.handle(a.id), a);
+        assert_eq!(h.with(&h.handle(a.id), |n| Ok(*n)).unwrap(), 5);
+        let err = h.with(&h.handle(99), |_| Ok(())).unwrap_err();
+        assert_eq!(err.message(), "unknown or closed watcher handle 99");
     }
 }
