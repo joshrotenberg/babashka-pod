@@ -1,13 +1,15 @@
 //! Runtime tests that drive a pod over in-memory streams.
 
+use std::collections::HashMap;
 use std::io::{self, Cursor, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
 use crate::bencode::{Value, read_value};
-use crate::{Emitter, Error, Namespace, NoArgs, Pod, PodError};
+use crate::{CancelToken, Emitter, Error, Namespace, NoArgs, Pod, PodError};
 
 #[derive(Clone, Default)]
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
@@ -552,4 +554,315 @@ fn stream_fn_wrapper_passes_arg_meta() {
     );
     let code = vars[1].get_str("code").unwrap();
     assert!(code.contains(":arg-meta true"), "{code}");
+}
+
+/// A reader fed message by message from the test, so a pod can be driven
+/// while it runs. Dropping the sender ends the input.
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: Cursor<Vec<u8>>,
+}
+
+impl io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = io::Read::read(&mut self.buf, out)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            match self.rx.recv() {
+                Ok(bytes) => self.buf = Cursor::new(bytes),
+                Err(_) => return Ok(0),
+            }
+        }
+    }
+}
+
+/// A pod running on its own thread, fed through a channel.
+struct LivePod {
+    tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    out: SharedBuf,
+    done: std::sync::mpsc::Receiver<Result<(), Error>>,
+}
+
+impl LivePod {
+    fn start(pod: Pod) -> Self {
+        Self::start_with(pod, SharedBuf::default(), |pod, reader, out| {
+            pod.run_with(reader, out)
+        })
+    }
+
+    fn start_with(
+        pod: Pod,
+        out: SharedBuf,
+        run: impl FnOnce(Pod, ChannelReader, SharedBuf) -> Result<(), Error> + Send + 'static,
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let reader = ChannelReader {
+            rx,
+            buf: Cursor::new(Vec::new()),
+        };
+        let writer = out.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(run(pod, reader, writer));
+        });
+        LivePod {
+            tx: Some(tx),
+            out,
+            done,
+        }
+    }
+
+    fn send(&self, msg: Value) {
+        self.tx.as_ref().unwrap().send(msg.to_bytes()).unwrap();
+    }
+
+    fn output(&self) -> Vec<Value> {
+        decode_all(&self.out.0.lock().unwrap())
+    }
+
+    /// Waits until `pred` holds for the output so far.
+    fn wait_for(&self, what: &str, pred: impl Fn(&[Value]) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pred(&self.output()) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Ends the input and waits for the pod to return.
+    fn finish(mut self) -> (Result<(), Error>, Vec<Value>) {
+        drop(self.tx.take());
+        let result = self
+            .done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("pod did not return");
+        (result, self.output())
+    }
+}
+
+fn is_done(out: &[Value], id: &str) -> bool {
+    replies(out, id).iter().any(|m| status(m).contains(&"done"))
+}
+
+/// A pod whose `wait` streams block until cancelled, either polling with
+/// `wait_cancelled` or blocked on a channel fed by `on_cancel`, and whose
+/// `stop` cancels one of them by name.
+fn cancellable_pod(tokens: Arc<Mutex<HashMap<String, CancelToken>>>) -> Pod {
+    let (t1, t2, t3) = (tokens.clone(), tokens.clone(), tokens);
+    Pod::new()
+        .shutdown_grace(Duration::from_secs(10))
+        .namespace(
+            Namespace::new("pod.test.cancel")
+                .stream("wait", move |(name,): (String,), tx: Emitter| {
+                    t1.lock().unwrap().insert(name, tx.cancel_token());
+                    // No timeout short enough to matter: only cancellation
+                    // ends this call within the test.
+                    while !tx.wait_cancelled(Duration::from_secs(60)) {}
+                    tx.send("cancelled")?;
+                    Ok(())
+                })
+                .stream("recv", move |(name,): (String,), tx: Emitter| {
+                    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+                    tx.on_cancel(move || {
+                        let _ = stop_tx.send(());
+                    });
+                    t2.lock().unwrap().insert(name, tx.cancel_token());
+                    // Blocks with no timeout; only the hook wakes it.
+                    stop_rx.recv().map_err(|e| PodError::new(e.to_string()))?;
+                    tx.send("woken")?;
+                    Ok(())
+                })
+                .function("stop", move |(name,): (String,)| {
+                    let token = t3
+                        .lock()
+                        .unwrap()
+                        .remove(&name)
+                        .ok_or_else(|| PodError::new(format!("no call named {name}")))?;
+                    token.cancel();
+                    Ok::<_, PodError>(token.is_cancelled())
+                }),
+        )
+}
+
+fn wait_registered(tokens: &Arc<Mutex<HashMap<String, CancelToken>>>, names: &[&str]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !names
+        .iter()
+        .all(|n| tokens.lock().unwrap().contains_key(*n))
+    {
+        assert!(Instant::now() < deadline, "calls never registered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn cancel_token_ends_one_call_while_others_keep_running() {
+    let tokens = Arc::default();
+    let pod = LivePod::start(cancellable_pod(Arc::clone(&tokens)));
+    pod.send(invoke("1", "pod.test.cancel/wait", "[\"a\"]"));
+    pod.send(invoke("2", "pod.test.cancel/wait", "[\"b\"]"));
+    pod.send(invoke("3", "pod.test.cancel/recv", "[\"c\"]"));
+    wait_registered(&tokens, &["a", "b", "c"]);
+
+    pod.send(invoke("4", "pod.test.cancel/stop", "[\"a\"]"));
+    pod.wait_for("call 1 to finish", |out| is_done(out, "1"));
+    pod.send(invoke("5", "pod.test.cancel/stop", "[\"c\"]"));
+    pod.wait_for("call 3 to finish", |out| is_done(out, "3"));
+
+    let out = pod.output();
+    assert_eq!(replies(&out, "4")[0].get_str("value"), Some("true"));
+    assert_eq!(
+        replies(&out, "1")[0].get_str("value"),
+        Some("\"cancelled\"")
+    );
+    assert_eq!(replies(&out, "3")[0].get_str("value"), Some("\"woken\""));
+    assert!(!is_done(&out, "2"), "call 2 ended with call 1");
+
+    // End of input still cancels the remaining call.
+    let start = Instant::now();
+    let (result, out) = pod.finish();
+    result.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        replies(&out, "2")[0].get_str("value"),
+        Some("\"cancelled\"")
+    );
+    assert!(is_done(&out, "2"));
+}
+
+#[test]
+fn shutdown_runs_on_cancel_hooks_for_blocked_handlers() {
+    let tokens = Arc::default();
+    let pod = LivePod::start(cancellable_pod(Arc::clone(&tokens)));
+    pod.send(invoke("1", "pod.test.cancel/recv", "[\"a\"]"));
+    pod.send(invoke("2", "pod.test.cancel/recv", "[\"b\"]"));
+    wait_registered(&tokens, &["a", "b"]);
+    pod.send(msg(&[("op", "shutdown"), ("id", "3")]));
+    let (result, out) = pod.finish();
+    result.unwrap();
+    for id in ["1", "2"] {
+        assert_eq!(replies(&out, id)[0].get_str("value"), Some("\"woken\""));
+        assert!(is_done(&out, id));
+    }
+}
+
+#[test]
+fn on_cancel_after_cancellation_runs_immediately() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = ran.clone();
+    let pod = Pod::new().namespace(Namespace::new("pod.test.late").stream(
+        "late",
+        move |_: NoArgs, tx: Emitter| {
+            tx.cancel_token().cancel();
+            assert!(tx.is_cancelled());
+            assert!(tx.wait_cancelled(Duration::from_secs(60)));
+            let flag = flag.clone();
+            tx.on_cancel(move || flag.store(true, Ordering::SeqCst));
+            Ok(())
+        },
+    ));
+    let (result, out) = run(pod, &[invoke("1", "pod.test.late/late", "[]")]);
+    result.unwrap();
+    assert!(is_done(&out, "1"));
+    assert!(ran.load(Ordering::SeqCst));
+}
+
+#[test]
+fn on_cancel_hooks_do_not_run_for_calls_that_finish() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (flag, drop_flag) = (ran.clone(), dropped.clone());
+    let token_slot: Arc<Mutex<Option<CancelToken>>> = Arc::default();
+    let slot = token_slot.clone();
+
+    struct SetOnDrop(Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let pod = Pod::new().namespace(Namespace::new("pod.test.quick").stream(
+        "quick",
+        move |_: NoArgs, tx: Emitter| {
+            let (flag, guard) = (flag.clone(), SetOnDrop(drop_flag.clone()));
+            tx.on_cancel(move || {
+                let _guard = guard;
+                flag.store(true, Ordering::SeqCst);
+            });
+            *slot.lock().unwrap() = Some(tx.cancel_token());
+            Ok(())
+        },
+    ));
+    let live = LivePod::start(pod);
+    live.send(invoke("1", "pod.test.quick/quick", "[]"));
+    live.wait_for("call 1 to finish", |out| is_done(out, "1"));
+    // Cancelling the leftover token after the call finished does nothing,
+    // and neither does the pod-wide cancellation at end of input.
+    token_slot.lock().unwrap().take().unwrap().cancel();
+    let (result, _) = live.finish();
+    result.unwrap();
+    assert!(!ran.load(Ordering::SeqCst));
+    assert!(dropped.load(Ordering::SeqCst), "hook was not dropped");
+}
+
+/// Accepts writes until `fail` is set, then fails them as a broken pipe.
+#[derive(Clone, Default)]
+struct FailSwitch {
+    buf: SharedBuf,
+    fail: Arc<AtomicBool>,
+}
+
+impl Write for FailSwitch {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        self.buf.write(data)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn hook_that_sends_during_a_failed_write_does_not_deadlock() {
+    let send_result: Arc<Mutex<Option<bool>>> = Arc::default();
+    let registered = Arc::new(AtomicBool::new(false));
+    let (result_slot, reg) = (send_result.clone(), registered.clone());
+    let pod = Pod::new().namespace(Namespace::new("pod.test.hook").stream(
+        "hook",
+        move |_: NoArgs, tx: Emitter| {
+            let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+            let (sender, slot) = (tx.clone(), result_slot.clone());
+            tx.on_cancel(move || {
+                // Sends from inside the hook: the writer lock must be free.
+                *slot.lock().unwrap() = Some(sender.send("bye").is_ok());
+                let _ = stop_tx.send(());
+            });
+            reg.store(true, Ordering::SeqCst);
+            let _ = stop_rx.recv();
+            Ok(())
+        },
+    ));
+
+    let writer = FailSwitch::default();
+    let fail = writer.fail.clone();
+    let live = LivePod::start_with(pod, writer.buf.clone(), move |pod, reader, _| {
+        pod.run_with(reader, writer)
+    });
+    live.send(invoke("1", "pod.test.hook/hook", "[]"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !registered.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "hook never registered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    fail.store(true, Ordering::SeqCst);
+    // This reply fails to write, which cancels the in-flight call.
+    live.send(msg(&[("op", "describe")]));
+    let (result, _) = live.finish();
+    result.unwrap();
+    assert_eq!(*send_result.lock().unwrap(), Some(false));
 }

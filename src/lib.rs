@@ -39,7 +39,7 @@
 //!   `ex-info`. The pod keeps running.
 //! - The pod always declares the `shutdown` op. On `shutdown`, end of input, or
 //!   a failed write, in-flight calls are cancelled (see
-//!   [`Emitter::is_cancelled`]) and get a bounded grace period
+//!   [`Emitter::is_cancelled`] and [`Emitter::on_cancel`]) and get a bounded grace period
 //!   ([`Pod::shutdown_grace`]) before [`Pod::run`] returns. The runtime never
 //!   panics on I/O errors.
 
@@ -51,7 +51,7 @@ pub mod transit;
 
 pub use error::{Error, PodError};
 pub use handles::{Handle, Handles};
-pub use pod::{Emitter, Format, Namespace, NoArgs, Pod, is_pod_mode};
+pub use pod::{CancelToken, Emitter, Format, Namespace, NoArgs, Pod, is_pod_mode};
 pub use serde_json;
 
 #[cfg(test)]

@@ -98,9 +98,17 @@ Namespace::new("pod.example.db")
     .function("query", move |(h, sql): (Handle, String)| query.with(&h, |c| run(c, &sql)));
 ```
 
+A pod that has to match an existing client API with another shape, such as `{:watcher/id 1}`, can
+return its own value built from `h.id` and rebuild the handle with `Handles::handle(id)`, which
+uses the registry's kind. The `Handles` docs have an example.
+
 `with` locks only the value it runs on, so calls on different handles run concurrently. A handle of
 another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
 when `Pod::run` returns and the handlers holding the registry are dropped.
+
+`remove_with(&h, |v| ...)` removes the entry and runs a closure on the value in one step, for
+releasing a value while taking something out of it (a stop sender, final statistics). No call can
+reach the handle after it returns; a call already using the value finishes first.
 
 ## Errors
 
@@ -117,12 +125,43 @@ for the pod process with no timeout. The runtime treats `shutdown`, end of input
 (the client went away) the same way:
 
 1. Stop reading requests.
-2. Mark in-flight calls cancelled. Long-running handlers should poll `Emitter::is_cancelled` or
-   use `Emitter::wait_cancelled` in place of `sleep`.
+2. Cancel in-flight calls (see [Cancellation](#cancellation)).
 3. Wait up to `Pod::shutdown_grace` (2 seconds by default) for in-flight calls, then return from
    `Pod::run`.
 
 The runtime does not panic on I/O errors.
+
+## Cancellation
+
+A call is cancelled when the pod shuts down, or when its `CancelToken` is cancelled. Cancellation
+only signals; the call ends when its handler returns.
+
+| API | Use |
+|---|---|
+| `Emitter::is_cancelled()` | Check between units of work |
+| `Emitter::wait_cancelled(timeout)` | Block until cancelled, in place of `sleep` |
+| `Emitter::on_cancel(f)` | Run `f` once on cancellation, so a handler blocked on its own channel can be woken by forwarding into that channel. Runs immediately if the call is already cancelled; dropped unrun if the call finishes first |
+| `Emitter::cancel_token()` | A cloneable `CancelToken` that cancels this call alone. Store it (for example in a `Handles` registry) so another call such as `stop` or `unwatch` can end it |
+
+```rust
+.stream("watch", move |(path,): (String,), tx: Emitter| {
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let stop = events_tx.clone();
+    tx.on_cancel(move || { let _ = stop.send(Event::Stop); });
+    watches.insert(tx.cancel_token()); // `unwatch` cancels it
+    start_watching(&path, events_tx)?;
+    for event in events_rx {
+        match event {
+            Event::Stop => return Ok(()),
+            Event::Change(change) => tx.send(&change)?,
+        }
+    }
+    Ok(())
+})
+```
+
+`on_cancel` hooks run on the thread that cancels: the caller of `CancelToken::cancel`, or a
+runtime thread during shutdown. Keep them short and non-blocking.
 
 ## Transport
 
