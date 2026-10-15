@@ -117,12 +117,43 @@ for the pod process with no timeout. The runtime treats `shutdown`, end of input
 (the client went away) the same way:
 
 1. Stop reading requests.
-2. Mark in-flight calls cancelled. Long-running handlers should poll `Emitter::is_cancelled` or
-   use `Emitter::wait_cancelled` in place of `sleep`.
+2. Cancel in-flight calls (see [Cancellation](#cancellation)).
 3. Wait up to `Pod::shutdown_grace` (2 seconds by default) for in-flight calls, then return from
    `Pod::run`.
 
 The runtime does not panic on I/O errors.
+
+## Cancellation
+
+A call is cancelled when the pod shuts down, or when its `CancelToken` is cancelled. Cancellation
+only signals; the call ends when its handler returns.
+
+| API | Use |
+|---|---|
+| `Emitter::is_cancelled()` | Check between units of work |
+| `Emitter::wait_cancelled(timeout)` | Block until cancelled, in place of `sleep` |
+| `Emitter::on_cancel(f)` | Run `f` once on cancellation, so a handler blocked on its own channel can be woken by forwarding into that channel. Runs immediately if the call is already cancelled; dropped unrun if the call finishes first |
+| `Emitter::cancel_token()` | A cloneable `CancelToken` that cancels this call alone. Store it (for example in a `Handles` registry) so another call such as `stop` or `unwatch` can end it |
+
+```rust
+.stream("watch", move |(path,): (String,), tx: Emitter| {
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let stop = events_tx.clone();
+    tx.on_cancel(move || { let _ = stop.send(Event::Stop); });
+    watches.insert(tx.cancel_token()); // `unwatch` cancels it
+    start_watching(&path, events_tx)?;
+    for event in events_rx {
+        match event {
+            Event::Stop => return Ok(()),
+            Event::Change(change) => tx.send(&change)?,
+        }
+    }
+    Ok(())
+})
+```
+
+`on_cancel` hooks run on the thread that cancels: the caller of `CancelToken::cancel`, or a
+runtime thread during shutdown. Keep them short and non-blocking.
 
 ## Transport
 
