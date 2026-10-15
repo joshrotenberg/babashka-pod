@@ -5,19 +5,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use babashka_pod::serde_json::{Value, json};
-use babashka_pod::{Emitter, Handle, Handles, Namespace, Pod, PodError};
+use babashka_pod::{CancelToken, Emitter, Handles, Namespace, Pod, PodError};
 use notify::event::{EventKind, ModifyKind, RenameMode};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 
 const NS: &str = "pod.babashka.fswatcher";
-
-/// How often a running watch checks whether the pod is shutting down.
-const POLL: Duration = Duration::from_millis(50);
 
 /// The client side of `watch`, the same as the Go pod's: create the watcher,
 /// start streaming its events to `callback`, return `{:watcher/id n}`.
@@ -70,12 +67,12 @@ enum Msg {
     Stop,
 }
 
-/// A watcher created by `-create-watcher`. `stop` is set once
-/// `-start-watcher` is running it.
+/// A watcher created by `-create-watcher`. `stop` cancels the
+/// `-start-watcher` call running it, once there is one.
 struct Watch {
     root: Root,
     opts: Opts,
-    stop: Option<Sender<Msg>>,
+    stop: Option<CancelToken>,
 }
 
 /// The watched path as the caller spelled it, and the absolute forms notify
@@ -202,13 +199,6 @@ fn event(kind: &str, path: &str) -> Value {
     json!({ "type": kind, "path": path })
 }
 
-fn handle(id: u64) -> Handle {
-    Handle {
-        handle: "watcher".into(),
-        id,
-    }
-}
-
 fn watcher_id(watcher: &Value) -> Result<u64, PodError> {
     watcher
         .get("watcher/id")
@@ -231,13 +221,20 @@ fn create(watches: &Handles<Watch>, path: &str, opts: Opts) -> Result<Value, Pod
 
 /// Runs a watcher until `unwatch` stops it or the pod shuts down, sending
 /// each change to the client.
+///
+/// Blocks on one channel: notify's events, and a `Stop` sent when the call is
+/// cancelled, by `unwatch` through the stored token or by pod shutdown.
 fn run(watches: &Handles<Watch>, id: u64, tx: &Emitter) -> Result<(), PodError> {
     let (msgs, rx) = mpsc::channel();
-    let (root, opts) = watches.with(&handle(id), |w| {
+    let stop = msgs.clone();
+    tx.on_cancel(move || {
+        let _ = stop.send(Msg::Stop);
+    });
+    let (root, opts) = watches.with(&watches.handle(id), |w| {
         if w.stop.is_some() {
             return Err(PodError::new(format!("watcher {id} is already running")));
         }
-        w.stop = Some(msgs.clone());
+        w.stop = Some(tx.cancel_token());
         Ok((w.root.clone(), w.opts.clone()))
     })?;
 
@@ -261,13 +258,13 @@ fn run(watches: &Handles<Watch>, id: u64, tx: &Emitter) -> Result<(), PodError> 
 
     let mut pending = Debouncer::new(Duration::from_millis(opts.delay_ms));
     loop {
-        if tx.is_cancelled() {
-            return Ok(());
-        }
-        let wait = pending.next_due().map_or(POLL, |due| {
-            due.saturating_duration_since(Instant::now()).min(POLL)
-        });
-        match rx.recv_timeout(wait) {
+        // Wake for the next debounced event if one is pending; otherwise wait
+        // for an event or Stop with no timeout.
+        let msg = match pending.next_due() {
+            Some(due) => rx.recv_timeout(due.saturating_duration_since(Instant::now())),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match msg {
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
             Ok(Msg::Event(Ok(ev))) => {
                 for (kind, path) in changes(&ev) {
@@ -295,11 +292,10 @@ fn run(watches: &Handles<Watch>, id: u64, tx: &Emitter) -> Result<(), PodError> 
 /// Stops and forgets a watcher. Unknown or already stopped watchers are
 /// ignored, as in the Go pod.
 fn stop(watches: &Handles<Watch>, watcher: Value) -> Result<Value, PodError> {
-    let h = handle(watcher_id(&watcher)?);
-    if let Ok(Some(stop)) = watches.with(&h, |w| Ok(w.stop.take())) {
-        let _ = stop.send(Msg::Stop);
+    let h = watches.handle(watcher_id(&watcher)?);
+    if let Ok(Some(running)) = watches.remove_with(&h, |w| Ok(w.stop.take())) {
+        running.cancel();
     }
-    let _ = watches.remove(&h);
     Ok(watcher)
 }
 
@@ -448,19 +444,13 @@ mod tests {
     }
 
     #[test]
-    fn unwatch_stops_a_running_watcher_and_ignores_unknown_ones() {
+    fn unwatch_forgets_a_watcher_and_ignores_unknown_ones() {
+        // Stopping a running watcher is covered end to end by tests/bb.rs;
+        // a CancelToken only exists inside a running call.
         let watches = Handles::new("watcher");
         let dir = std::env::temp_dir();
         let w = create(&watches, dir.to_str().unwrap(), Opts::default()).unwrap();
-        let (tx, rx) = mpsc::channel();
-        watches
-            .with(&handle(watcher_id(&w).unwrap()), |w| {
-                w.stop = Some(tx);
-                Ok(())
-            })
-            .unwrap();
         assert_eq!(stop(&watches, w.clone()).unwrap(), w);
-        assert!(matches!(rx.try_recv(), Ok(Msg::Stop)));
         assert!(watches.is_empty());
         // Again, and with a watcher that never existed.
         assert_eq!(stop(&watches, w.clone()).unwrap(), w);
