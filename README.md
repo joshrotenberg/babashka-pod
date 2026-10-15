@@ -102,6 +102,10 @@ Namespace::new("pod.example.db")
 another kind, or one already removed, produces an error reply. Values are dropped on `remove`, or
 when `Pod::run` returns and the handlers holding the registry are dropped.
 
+`remove_with(&h, |v| ...)` removes the entry and runs a closure on the value in one step, for
+releasing a value while taking something out of it (a stop sender, final statistics). No call can
+reach the handle after it returns; a call already using the value finishes first.
+
 ## Errors
 
 A handler that returns `Err(PodError)` produces an error reply, which babashka raises as

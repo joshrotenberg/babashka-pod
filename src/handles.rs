@@ -17,7 +17,7 @@
 //!             Ok(*n)
 //!         })
 //!     })
-//!     .function("close!", move |(h,): (Handle,)| c3.remove(&h));
+//!     .function("close!", move |(h,): (Handle,)| c3.remove_with(&h, |n| Ok(*n)));
 //! ```
 
 use std::collections::HashMap;
@@ -126,6 +126,31 @@ impl<T> Handles<T> {
             .ok_or_else(|| self.unknown(handle))
     }
 
+    /// Removes the value behind `handle` and runs `f` on it, in one step.
+    ///
+    /// Use it to pull something out of a value while releasing it, such as a
+    /// sender that stops a background task. Once the entry is removed no new
+    /// call can reach the handle. A call already running [`with`](Self::with)
+    /// on the value finishes first, and `f` sees its changes.
+    ///
+    /// The value is dropped once no call is using it, as with
+    /// [`remove`](Self::remove). The entry is removed even if `f` returns an
+    /// error. Fails like `remove` for a handle it does not hold, without
+    /// running `f`.
+    pub fn remove_with<R>(
+        &self,
+        handle: &Handle,
+        f: impl FnOnce(&mut T) -> Result<R, PodError>,
+    ) -> Result<R, PodError> {
+        self.check_kind(handle)?;
+        let entry = self
+            .values()
+            .remove(&handle.id)
+            .ok_or_else(|| self.unknown(handle))?;
+        let mut value = entry.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut value)
+    }
+
     /// How many values are stored.
     pub fn len(&self) -> usize {
         self.values().len()
@@ -203,6 +228,92 @@ mod tests {
         let err = h.with(&a, |_| Ok(())).unwrap_err();
         assert_eq!(err.message(), "unknown or closed list handle 1");
         assert!(h.remove(&a).is_err());
+    }
+
+    #[test]
+    fn remove_with_returns_from_the_value() {
+        let h: Handles<Vec<i32>> = Handles::new("list");
+        let a = h.insert(vec![1, 2]);
+        let taken = h.remove_with(&a, |v| Ok(std::mem::take(v))).unwrap();
+        assert_eq!(taken, [1, 2]);
+        assert!(h.is_empty());
+        let err = h.with(&a, |_| Ok(())).unwrap_err();
+        assert_eq!(err.message(), "unknown or closed list handle 1");
+    }
+
+    #[test]
+    fn remove_with_errors_match_remove() {
+        let conns: Handles<()> = Handles::new("connection");
+        let stmts: Handles<()> = Handles::new("statement");
+        let s = stmts.insert(());
+        let gone = Handle {
+            handle: "connection".into(),
+            id: 9,
+        };
+        for h in [&s, &gone] {
+            let via_remove = conns.remove(h).unwrap_err();
+            let via_remove_with = conns
+                .remove_with(h, |_| -> Result<(), PodError> { panic!("ran f") })
+                .unwrap_err();
+            assert_eq!(via_remove, via_remove_with);
+        }
+    }
+
+    #[test]
+    fn remove_with_removes_even_when_f_fails() {
+        let h: Handles<i32> = Handles::new("n");
+        let a = h.insert(1);
+        let err = h
+            .remove_with(&a, |_| -> Result<(), PodError> { Err(PodError::new("no")) })
+            .unwrap_err();
+        assert_eq!(err.message(), "no");
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn remove_with_waits_for_a_call_holding_the_value() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let h: Handles<Vec<&str>> = Handles::new("log");
+        let a = h.insert(vec![]);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = {
+            let (h, a) = (h.clone(), a.clone());
+            thread::spawn(move || {
+                h.with(&a, |v| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    v.push("holder");
+                    Ok(())
+                })
+                .unwrap()
+            })
+        };
+        entered_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let remover = {
+            let (h, a) = (h.clone(), a.clone());
+            thread::spawn(move || {
+                let seen = h.remove_with(&a, |v| Ok(v.clone())).unwrap();
+                done_tx.send(()).unwrap();
+                seen
+            })
+        };
+        // The entry is gone at once, but remove_with waits for the holder.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !h.is_empty() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(h.with(&a, |_| Ok(())).is_err());
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(remover.join().unwrap(), ["holder"]);
     }
 
     #[test]
