@@ -1,2 +1,3 @@
 /target
 .babashka-pod-*.port
+/dist

@@ -161,6 +161,30 @@ bb examples/transit.bb socket
 
 They are workspace members with `publish = false`; `cargo test --workspace` runs their bb tests.
 
+## Releasing a pod
+
+`bb.edn` at the repository root has the release tasks (code in `release/`); each takes `--help`.
+
+| Task | Does |
+|---|---|
+| `bb arch <file>` | Reads a binary's Mach-O, ELF, or PE header and prints the OS and CPU it was built for |
+| `bb package --target <triple>` | Zips `target/<triple>/release/pod-sqlite[.exe]` as `dist/pod-sqlite-<version>-<os>-<arch>.zip` with a `.sha256`, after checking the header matches the target |
+| `bb manifest --base-url <url>` | Writes `dist/manifest.edn` in the pod-registry format from the zips in `dist/`, opening each one and checking the binary's header against its `:os/name` and `:os/arch`; refuses on a mismatch |
+| `bb check-version <tag>` | Fails unless the tag is `pod-sqlite-v<version from pods/sqlite/Cargo.toml>` |
+| `bb release-test` | Tests for the above (CI runs it) |
+
+The registry matches `:os/arch` against babashka's `os.arch`: `aarch64` or `x86_64` on macOS,
+`amd64` or `aarch64` on Linux and Windows. Nothing in the registry checks the binary itself, which
+is how a manifest can list an x86_64 binary as `aarch64` (fswatcher 0.0.5) or leave out a build
+the release has (go-sqlite3 0.3.13 has no macOS `aarch64` entry). `bb manifest` builds the
+manifest from the binaries, so neither can happen.
+
+`.github/workflows/release-pod-sqlite.yml` runs on a `pod-sqlite-v*` tag: it builds macOS
+`aarch64` and `x86_64`, Linux `x86_64` and `aarch64`, and Windows `x86_64`, runs `test.bb` where the
+runner can execute the binary, packages each build, generates the manifest, and creates a GitHub
+release with all of it. Registry manifests point at public URLs, so submitting to the pod registry
+needs the release assets to be public.
+
 ## License
 
 MIT OR Apache-2.0

@@ -1,0 +1,139 @@
+name: release pod-sqlite
+
+# Push a tag like pod-sqlite-v0.1.0 (matching pods/sqlite/Cargo.toml), or run
+# manually with an existing tag. Builds every platform, checks each binary's
+# header against the platform it is released for (bb package / bb manifest),
+# and creates a GitHub release with the zips, their sha256 files, and a
+# pod-registry manifest.edn.
+
+on:
+  push:
+    tags: ["pod-sqlite-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. pod-sqlite-v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            run-tests: true
+          # Built on the arm64 runner; it cannot run x86_64 code without
+          # Rosetta, so test.bb is skipped and the header check stands in.
+          - target: x86_64-apple-darwin
+            os: macos-14
+            run-tests: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            run-tests: true
+          # Cross-compiled with cross. A native arm64 runner (ubuntu-22.04-arm)
+          # could run test.bb, but those runners may not be available to
+          # private repositories.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            run-tests: false
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            run-tests: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: latest
+
+      - name: tag matches Cargo.toml
+        run: bb check-version "$TAG"
+
+      - name: install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked -p pod-sqlite --target "${{ matrix.target }}"
+          else
+            cargo build --release --locked -p pod-sqlite --target "${{ matrix.target }}"
+          fi
+
+      - name: header
+        run: bb arch target/${{ matrix.target }}/release/pod-sqlite${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      - name: test.bb
+        if: matrix.run-tests
+        env:
+          SQLITE_POD: target/${{ matrix.target }}/release/pod-sqlite${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          bb pods/sqlite/test.bb
+          bb pods/sqlite/test.bb socket
+
+      - name: package
+        run: bb package --target "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pod-sqlite-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: latest
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pod-sqlite-*
+          merge-multiple: true
+
+      # Opens every zip and checks the binary's header against its entry.
+      - name: manifest
+        run: bb manifest --base-url "https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/*.zip dist/*.sha256 dist/manifest.edn \
+            --title "$TAG" \
+            --notes "pod-sqlite ${TAG#pod-sqlite-v}. manifest.edn is the pod-registry manifest for these assets."

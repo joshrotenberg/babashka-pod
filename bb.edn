@@ -1,0 +1,14 @@
+;; Release tooling for the pods in this workspace. Code in release/.
+;; `bb tasks` lists them; each takes --help.
+{:paths ["release"]
+ :tasks
+ {arch          {:exec-fn release/arch}
+  package       {:exec-fn release/package}
+  manifest      {:exec-fn release/manifest}
+  check-version {:exec-fn release/check-version}
+  release-test  {:doc      "Run the release tooling tests"
+                 :extra-paths ["release/test"]
+                 :requires ([clojure.test :as t] [release-test])
+                 :task     (let [{:keys [fail error]} (t/run-tests 'release-test)]
+                             (when (pos? (+ fail error))
+                               (throw (ex-info "release tests failed" {:babashka/exit 1}))))}}}
