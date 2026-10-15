@@ -621,12 +621,14 @@ fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value
         }
     };
 
-    shared.begin();
-    let tx = Emitter::new(id.clone(), shared.clone());
+    let call = shared.begin();
+    let tx = Emitter::new(id.clone(), shared.clone(), call.clone());
     let spawned = thread::Builder::new()
         .name(format!("pod:{var}"))
         .spawn(move || {
             let outcome = catch_unwind(AssertUnwindSafe(|| handler(args, tx.clone())));
+            // The handler has returned, so cancellation no longer applies.
+            tx.call.finish();
             let reply = match outcome {
                 Ok(Ok(Some(value))) => Value::dict([
                     ("id", Value::from(tx.id.as_str())),
@@ -652,10 +654,10 @@ fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value
                 }
             };
             tx.finish(&reply);
-            tx.shared.end();
+            tx.shared.end(&tx.call);
         });
     if let Err(e) = spawned {
-        shared.end();
+        shared.end(&call);
         let err = PodError::new(format!(
             "could not start a thread for {}: {e}",
             msg.get_str("var").unwrap_or_default()
@@ -680,18 +682,24 @@ fn error_reply(id: &str, err: &PodError, format: Format) -> Value {
 /// Handed to [`stream`](Namespace::stream) handlers. It is cheap to clone and
 /// can be moved to other threads; sends from any clone are ordered and never
 /// interleave with other calls' replies.
+///
+/// A call is cancelled when the pod shuts down (the `shutdown` op, end of
+/// input, or a failed write) or when its [`CancelToken`] is cancelled.
+/// Cancellation only signals: the call ends when the handler returns.
 #[derive(Clone)]
 pub struct Emitter {
     id: String,
     finished: Arc<AtomicBool>,
+    call: Arc<Call>,
     shared: Arc<Shared>,
 }
 
 impl Emitter {
-    fn new(id: String, shared: Arc<Shared>) -> Self {
+    fn new(id: String, shared: Arc<Shared>, call: Arc<Call>) -> Self {
         Emitter {
             id,
             finished: Arc::new(AtomicBool::new(false)),
+            call,
             shared,
         }
     }
@@ -723,48 +731,190 @@ impl Emitter {
         ]))
     }
 
-    /// True once the pod is shutting down. Long-running handlers should check
-    /// this and return.
+    /// True once this call is cancelled, either through its [`CancelToken`]
+    /// or because the pod is shutting down. Long-running handlers should
+    /// check this and return.
     pub fn is_cancelled(&self) -> bool {
-        self.shared.state().cancelled
+        let state = self.shared.state();
+        state.cancelled || self.call.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Blocks until the pod starts shutting down or `timeout` passes.
-    /// Returns true if it is shutting down.
+    /// Blocks until this call is cancelled or `timeout` passes. Returns true
+    /// if it is cancelled.
     ///
     /// Use it in place of `thread::sleep` in polling loops, or with a long
-    /// timeout to keep a call open while other threads send values.
+    /// timeout to keep a call open while other threads send values. A handler
+    /// that blocks on its own channel can use [`on_cancel`](Self::on_cancel)
+    /// instead.
     pub fn wait_cancelled(&self, timeout: Duration) -> bool {
         let state = self.shared.state();
         let (state, _) = self
             .shared
             .changed
-            .wait_timeout_while(state, timeout, |s| !s.cancelled)
+            .wait_timeout_while(state, timeout, |s| {
+                !(s.cancelled || self.call.cancelled.load(Ordering::SeqCst))
+            })
             .unwrap_or_else(|e| e.into_inner());
-        state.cancelled
+        state.cancelled || self.call.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Returns a token that cancels this call alone.
+    ///
+    /// Store it where another call can reach it, for example in a
+    /// [`Handles`](crate::Handles) registry, to implement a `stop` or
+    /// `unwatch` function.
+    pub fn cancel_token(&self) -> CancelToken {
+        CancelToken {
+            call: self.call.clone(),
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// Runs `f` once when this call is cancelled, through its [`CancelToken`]
+    /// or because the pod is shutting down.
+    ///
+    /// If the call is already cancelled, `f` runs right away on this thread.
+    /// If the call finishes first, `f` is dropped without running, which
+    /// drops anything it captured (a channel sender, for example).
+    ///
+    /// `f` runs on the thread that cancels: the caller of
+    /// [`CancelToken::cancel`], or a runtime thread during shutdown. Keep it
+    /// short and non-blocking, such as sending on a channel the handler is
+    /// waiting on.
+    pub fn on_cancel(&self, f: impl FnOnce() + Send + 'static) {
+        self.call.on_cancel(Box::new(f));
     }
 
     fn emit(&self, msg: Value) -> Result<(), PodError> {
-        let mut writer = self.shared.writer();
-        if self.finished.load(Ordering::SeqCst) {
-            return Err(PodError::new("call already finished"));
-        }
-        if !self.shared.write_locked(&mut writer, &msg) {
+        let written = {
+            let mut writer = self.shared.writer();
+            if self.finished.load(Ordering::SeqCst) {
+                return Err(PodError::new("call already finished"));
+            }
+            self.shared.write_locked(&mut writer, &msg)
+        };
+        if !written {
+            self.shared.cancel();
             return Err(PodError::new("client disconnected"));
         }
         Ok(())
     }
 
     fn finish(&self, reply: &Value) {
-        let mut writer = self.shared.writer();
-        self.finished.store(true, Ordering::SeqCst);
-        self.shared.write_locked(&mut writer, reply);
+        let written = {
+            let mut writer = self.shared.writer();
+            self.finished.store(true, Ordering::SeqCst);
+            self.shared.write_locked(&mut writer, reply)
+        };
+        if !written {
+            self.shared.cancel();
+        }
+    }
+}
+
+/// Cancels one in-flight call. Obtained from [`Emitter::cancel_token`].
+///
+/// Cloneable and `Send`. Cancelling wakes [`Emitter::wait_cancelled`] and
+/// runs the call's [`Emitter::on_cancel`] hooks; it does nothing once the call
+/// has finished.
+#[derive(Clone)]
+pub struct CancelToken {
+    call: Arc<Call>,
+    shared: Arc<Shared>,
+}
+
+impl CancelToken {
+    /// Cancels the call. Hooks registered with [`Emitter::on_cancel`] run on
+    /// this thread before it returns. Cancelling twice has no further effect.
+    pub fn cancel(&self) {
+        {
+            // Set the flag under the state lock so a waiter in
+            // `wait_cancelled` cannot miss the wakeup.
+            let _state = self.shared.state();
+            self.call.cancelled.store(true, Ordering::SeqCst);
+        }
+        self.shared.changed.notify_all();
+        self.call.run_hooks();
+    }
+
+    /// True once the call is cancelled, through this token or pod-wide.
+    pub fn is_cancelled(&self) -> bool {
+        let state = self.shared.state();
+        state.cancelled || self.call.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+type Hook = Box<dyn FnOnce() + Send>;
+
+enum Hooks {
+    Pending(Vec<Hook>),
+    Cancelled,
+    Finished,
+}
+
+/// Per-call cancellation state.
+struct Call {
+    key: u64,
+    cancelled: AtomicBool,
+    hooks: Mutex<Hooks>,
+}
+
+impl Call {
+    fn hooks(&self) -> MutexGuard<'_, Hooks> {
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn on_cancel(&self, f: Hook) {
+        let mut hooks = self.hooks();
+        match &mut *hooks {
+            Hooks::Pending(pending) => pending.push(f),
+            Hooks::Cancelled => {
+                drop(hooks);
+                f();
+            }
+            Hooks::Finished => {}
+        }
+    }
+
+    /// Runs pending hooks once, outside the lock.
+    fn run_hooks(&self) {
+        let pending = {
+            let mut hooks = self.hooks();
+            match std::mem::replace(&mut *hooks, Hooks::Cancelled) {
+                Hooks::Pending(pending) => pending,
+                Hooks::Cancelled => Vec::new(),
+                Hooks::Finished => {
+                    *hooks = Hooks::Finished;
+                    Vec::new()
+                }
+            }
+        };
+        for hook in pending {
+            hook();
+        }
+    }
+
+    /// Drops hooks that never ran, once the call is over.
+    fn finish(&self) {
+        let mut hooks = self.hooks();
+        if matches!(*hooks, Hooks::Pending(_)) {
+            *hooks = Hooks::Finished;
+        }
     }
 }
 
 struct State {
     cancelled: bool,
-    inflight: usize,
+    next_key: u64,
+    calls: HashMap<u64, Arc<Call>>,
 }
 
 struct Shared {
@@ -783,7 +933,8 @@ impl Shared {
             closed: AtomicBool::new(false),
             state: Mutex::new(State {
                 cancelled: false,
-                inflight: 0,
+                next_key: 0,
+                calls: HashMap::new(),
             }),
             changed: Condvar::new(),
         }
@@ -798,12 +949,18 @@ impl Shared {
     }
 
     fn write(&self, msg: &Value) {
-        let mut writer = self.writer();
-        self.write_locked(&mut writer, msg);
+        let written = {
+            let mut writer = self.writer();
+            self.write_locked(&mut writer, msg)
+        };
+        if !written {
+            self.cancel();
+        }
     }
 
     /// Writes one whole message. A failed write means the client is gone, so
-    /// it marks the connection closed and cancels in-flight calls.
+    /// it marks the connection closed. Callers cancel in-flight calls after
+    /// releasing the writer lock, because `on_cancel` hooks may send.
     fn write_locked(&self, writer: &mut Box<dyn Write + Send>, msg: &Value) -> bool {
         if self.is_closed() {
             return false;
@@ -813,7 +970,6 @@ impl Shared {
             Ok(()) => true,
             Err(_) => {
                 self.closed.store(true, Ordering::SeqCst);
-                self.cancel();
                 false
             }
         }
@@ -823,17 +979,42 @@ impl Shared {
         self.closed.load(Ordering::SeqCst)
     }
 
+    /// Cancels every in-flight call and runs their hooks. Must not be called
+    /// with the writer lock held.
     fn cancel(&self) {
-        self.state().cancelled = true;
+        let calls: Vec<Arc<Call>> = {
+            let mut state = self.state();
+            state.cancelled = true;
+            state.calls.values().cloned().collect()
+        };
         self.changed.notify_all();
+        for call in calls {
+            call.run_hooks();
+        }
     }
 
-    fn begin(&self) {
-        self.state().inflight += 1;
+    /// Registers a new in-flight call. If the pod is already shutting down,
+    /// the call starts out cancelled.
+    fn begin(&self) -> Arc<Call> {
+        let mut state = self.state();
+        let key = state.next_key;
+        state.next_key += 1;
+        let call = Arc::new(Call {
+            key,
+            cancelled: AtomicBool::new(false),
+            hooks: Mutex::new(if state.cancelled {
+                Hooks::Cancelled
+            } else {
+                Hooks::Pending(Vec::new())
+            }),
+        });
+        state.calls.insert(key, call.clone());
+        call
     }
 
-    fn end(&self) {
-        self.state().inflight -= 1;
+    fn end(&self, call: &Call) {
+        call.finish();
+        self.state().calls.remove(&call.key);
         self.changed.notify_all();
     }
 
@@ -841,7 +1022,7 @@ impl Shared {
         let state = self.state();
         let _ = self
             .changed
-            .wait_timeout_while(state, grace, |s| s.inflight > 0)
+            .wait_timeout_while(state, grace, |s| !s.calls.is_empty())
             .unwrap_or_else(|e| e.into_inner());
     }
 }
