@@ -38,3 +38,7 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+      # Release tooling (bb.edn, release/): header parsing and manifest checks.
+      - name: release tooling tests
+        run: bb release-test
