@@ -189,8 +189,30 @@ bb examples/transit.bb socket
 
 ## Not yet supported
 
-- The EDN payload format, and `readers`, which the pod protocol defines for EDN only.
 - Async (tokio) handlers.
+- The EDN payload format, and `readers`, which the pod protocol defines for EDN only. This is a
+  decision, not a gap; see below.
+
+### Why not EDN
+
+The payload format is the pod's choice and script authors never see it, so EDN would only be
+worth adding for something transit+json cannot do. Transit already covers it:
+
+- Clojure types going back to babashka: keywords, symbols, sets, insts, uuids, tagged values.
+- Custom tags: return a `transit::Tagged` and register a read handler from the pod's `code`, the
+  transit equivalent of EDN `readers` (see `examples/transit_pod.rs`).
+- Metadata and `arg-meta`, which the protocol supports for transit only.
+
+EDN would not keep more types on the way in either: arguments decode into `serde_json::Value` in
+any format, which loses keywords, chars, ratios, big numbers and lists. That is tracked in
+[#22](https://github.com/joshrotenberg/babashka-pod/issues/22).
+
+It would cost a third format to test across every example and transport, plus a reader. The most
+likely crate, `clojure-reader`, does not read `##Inf`/`##NaN` or `\uXXXX` characters, and reads `^`
+metadata and trailing input after the first value wrongly without an error.
+
+We would revisit it for a pod client other than `babashka.pods` that speaks EDN but not transit,
+or if readable payloads became necessary and a debug log of decoded traffic would not do.
 
 ## Pods built with this crate
 
