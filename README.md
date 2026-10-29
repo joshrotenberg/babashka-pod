@@ -7,6 +7,16 @@ The crate implements the pod side of the protocol: `describe`, `invoke`, `load-n
 and typed Rust functions; the runtime handles bencode framing, concurrency, error replies and
 shutdown.
 
+## Install
+
+```sh
+cargo add babashka-pod
+```
+
+API documentation is on [docs.rs](https://docs.rs/babashka-pod).
+
+## Usage
+
 ```rust
 use babashka_pod::{Emitter, Namespace, Pod, PodError};
 
@@ -248,4 +258,5 @@ needs the release assets to be public.
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
+at your option.
