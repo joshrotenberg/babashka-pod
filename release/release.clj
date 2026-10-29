@@ -111,14 +111,91 @@
       (not (contains? (:cpus h) cpu))
       (format "built for %s, listed as %s" (str/join "+" (sort (:cpus h))) cpu))))
 
-;; --- versions ----------------------------------------------------------------
+;; --- pods ----------------------------------------------------------------
+
+(def ^:private toml-escapes
+  {"b" "\b" "t" "\t" "n" "\n" "f" "\f" "r" "\r" "\"" "\"" "\\" "\\"})
+
+(defn- unescape
+  "Decodes the escapes of a TOML basic string: \\b \\t \\n \\f \\r \\\" \\\\
+  \\uXXXX and \\UXXXXXXXX. Throws on any other escape."
+  [s]
+  (str/replace s #"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)"
+               (fn [[m e]]
+                 (cond
+                   (toml-escapes e) (toml-escapes e)
+                   (#{\u \U} (first e)) (String. (Character/toChars (Integer/parseInt (subs e 1) 16)))
+                   :else (throw (ex-info (str "unsupported TOML escape " m) {:babashka/exit 1}))))))
+
+(defn toml-strings
+  "The string values in a Cargo.toml as {section {key value}}, with nil for
+  keys before the first section. Reads only one-line `key = \"value\"`
+  entries, which is all [package] and [package.metadata.pod-registry] need."
+  [text]
+  (loop [[line & more] (str/split-lines text)
+         section nil
+         acc {}]
+    (if (nil? line)
+      acc
+      (let [line (str/trim line)]
+        (if-let [[_ header] (re-matches #"\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?" line)]
+          (recur more header acc)
+          (if (str/starts-with? line "[[")
+            (recur more ::array acc)
+            (if-let [[_ k v] (re-matches #"([A-Za-z0-9_-]+)\s*=\s*\"((?:[^\"\\]|\\.)*)\"\s*(?:#.*)?" line)]
+              (recur more section (assoc-in acc [section k] (unescape v)))
+              (recur more section acc))))))))
+
+(defn pod-info
+  "What the release tooling needs from pods/<pod>/Cargo.toml: the crate
+  name (which must be pod-<pod>), version, and pod-registry name and
+  description from [package.metadata.pod-registry]. The description falls
+  back to the package description."
+  [pod]
+  (let [path (fs/path "pods" pod "Cargo.toml")
+        _    (when-not (fs/exists? path)
+               (throw (ex-info (str "no pod " pod ": " path " does not exist") {:babashka/exit 1})))
+        toml (toml-strings (slurp (str path)))
+        pkg  (get toml "package")
+        reg  (get toml "package.metadata.pod-registry")
+        crate (get pkg "name")]
+    (when-not (= crate (str "pod-" pod))
+      (throw (ex-info (format "%s: package name is %s; pods/%s must be the crate pod-%s"
+                              path crate pod pod)
+                      {:babashka/exit 1})))
+    (when-not (get pkg "version")
+      (throw (ex-info (str "no version in " path) {:babashka/exit 1})))
+    {:pod           pod
+     :crate         crate
+     :version       (get pkg "version")
+     :registry-name (get reg "name")
+     :description   (or (get reg "description") (get pkg "description"))}))
 
 (defn crate-version
   "The [package] version in pods/<pod>/Cargo.toml."
   [pod]
-  (let [toml (slurp (str (fs/path "pods" pod "Cargo.toml")))]
-    (or (second (re-find #"(?m)^version\s*=\s*\"([^\"]+)\"" toml))
-        (throw (ex-info (str "no version in pods/" pod "/Cargo.toml") {:babashka/exit 1})))))
+  (:version (pod-info pod)))
+
+(defn parse-tag
+  "Splits a release tag pod-<name>-v<version> into {:pod name :version v},
+  or returns nil."
+  [tag]
+  (when-let [[_ pod version] (and tag (re-matches #"pod-([a-z0-9][a-z0-9-]*)-v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)" tag))]
+    {:pod pod :version version}))
+
+(defn- checked-tag
+  "The pod-info for a release tag, after checking that the tag names an
+  existing pod and that pod's Cargo.toml version."
+  [tag]
+  (let [{:keys [pod version]} (or (parse-tag tag)
+                                  (throw (ex-info (format "tag %s is not pod-<name>-v<version>" tag)
+                                                  {:babashka/exit 1})))
+        info (pod-info pod)]
+    (when-not (= version (:version info))
+      (throw (ex-info (format "tag %s does not match pods/%s/Cargo.toml version %s (expected pod-%s-v%s)"
+                              tag pod (:version info) pod (:version info))
+                      {:babashka/exit 1})))
+    info))
 
 ;; --- tasks -------------------------------------------------------------------
 
@@ -148,12 +225,12 @@
 (defn package
   "Zip a release build for the pod registry, after checking its header"
   {:org.babashka/cli {:spec {:target  {:desc "Rust target triple, e.g. aarch64-apple-darwin"}
-                             :pod     {:default "sqlite" :desc "Pod directory under pods/"}
+                             :pod     {:desc "Pod directory under pods/, e.g. sqlite"}
                              :version {:desc "Defaults to the version in pods/<pod>/Cargo.toml"}
                              :dist    {:default "dist" :desc "Output directory"}}}}
   [{:keys [target pod version dist]}]
-  (when-not target
-    (throw (ex-info "--target is required" {:babashka/exit 1})))
+  (when-not (and target pod)
+    (throw (ex-info "--target and --pod are required" {:babashka/exit 1})))
   (let [platform (platform-for-target target)
         version  (or version (crate-version pod))
         exe-name (executable (str "pod-" pod) platform)
@@ -186,16 +263,21 @@
 
 (defn manifest
   "Write a pod-registry manifest.edn for the zips in dist, checking each binary"
-  {:org.babashka/cli {:spec {:pod         {:default "sqlite" :desc "Pod directory under pods/"}
+  {:org.babashka/cli {:spec {:pod         {:desc "Pod directory under pods/, e.g. sqlite"}
                              :version     {:desc "Defaults to the version in pods/<pod>/Cargo.toml"}
                              :base-url    {:desc "Release download URL prefix, e.g. https://github.com/<owner>/<repo>/releases/download/<tag>"}
-                             :name        {:default "joshrotenberg/pod-sqlite" :desc "Registry name, :pod/name"}
-                             :description {:default "SQLite, built on rusqlite with SQLite compiled in" :desc ":pod/description"}
+                             :name        {:desc "Registry name, :pod/name. Defaults to name in [package.metadata.pod-registry]"}
+                             :description {:desc ":pod/description. Defaults to description in [package.metadata.pod-registry], then [package]"}
                              :dist        {:default "dist" :desc "Directory with the zips; manifest.edn is written here"}}}}
   [{:keys [pod version base-url name description dist]}]
-  (when-not base-url
-    (throw (ex-info "--base-url is required" {:babashka/exit 1})))
-  (let [version  (or version (crate-version pod))
+  (when-not (and pod base-url)
+    (throw (ex-info "--pod and --base-url are required" {:babashka/exit 1})))
+  (let [info        (when-not (and version name description) (pod-info pod))
+        version     (or version (:version info))
+        name        (or name (:registry-name info)
+                        (throw (ex-info (str "no --name, and no name in [package.metadata.pod-registry] of pods/" pod "/Cargo.toml")
+                                        {:babashka/exit 1})))
+        description (or description (:description info))
         prefix   (format "pod-%s-%s-" pod version)
         zips     (->> (fs/glob dist (str prefix "*.zip")) (map str) sort)
         checked  (for [zip zips
@@ -241,15 +323,19 @@
       (println "wrote" (str out) "with" (count entries) "artifact(s)"))))
 
 (defn check-version
-  "Fail unless a release tag matches the pod's Cargo.toml version"
+  "Fail unless a release tag names a pod and matches its Cargo.toml version"
   {:org.babashka/cli {:args->opts [:tag]
-                      :spec {:tag {:desc "Tag such as pod-sqlite-v0.1.0"}
-                             :pod {:default "sqlite" :desc "Pod directory under pods/"}}}}
-  [{:keys [tag pod]}]
-  (let [version  (crate-version pod)
-        expected (str "pod-" pod "-v" version)]
-    (if (= tag expected)
-      (println (format "tag %s matches pods/%s/Cargo.toml version %s" tag pod version))
-      (throw (ex-info (format "tag %s does not match pods/%s/Cargo.toml version %s (expected %s)"
-                              tag pod version expected)
-                      {:babashka/exit 1})))))
+                      :spec {:tag {:desc "Tag such as pod-sqlite-v0.1.0"}}}}
+  [{:keys [tag]}]
+  (let [{:keys [pod version]} (checked-tag tag)]
+    (println (format "tag %s matches pods/%s/Cargo.toml version %s" tag pod version))))
+
+(defn release-plan
+  "Check a release tag and print pod=, crate= and version= lines for $GITHUB_OUTPUT"
+  {:org.babashka/cli {:args->opts [:tag]
+                      :spec {:tag {:desc "Tag such as pod-sqlite-v0.1.0"}}}}
+  [{:keys [tag]}]
+  (let [{:keys [pod crate version]} (checked-tag tag)]
+    (println (str "pod=" pod))
+    (println (str "crate=" crate))
+    (println (str "version=" version))))

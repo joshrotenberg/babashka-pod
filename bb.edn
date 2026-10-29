@@ -6,6 +6,7 @@
   package       {:exec-fn release/package}
   manifest      {:exec-fn release/manifest}
   check-version {:exec-fn release/check-version}
+  release-plan  {:exec-fn release/release-plan}
   release-test  {:doc      "Run the release tooling tests"
                  :extra-paths ["release/test"]
                  :requires ([clojure.test :as t] [release-test])

@@ -1,14 +1,16 @@
-name: release pod-sqlite
+name: release pod
 
-# Push a tag like pod-sqlite-v0.1.0 (matching pods/sqlite/Cargo.toml), or run
-# manually with an existing tag. Builds every platform, checks each binary's
-# header against the platform it is released for (bb package / bb manifest),
-# and creates a GitHub release with the zips, their sha256 files, and a
-# pod-registry manifest.edn.
+# Releases one pod from pods/. Push a tag pod-<name>-v<version> whose version
+# matches pods/<name>/Cargo.toml (pod-sqlite-v0.1.0 releases pods/sqlite), or
+# run manually with an existing tag. Builds every platform, checks each
+# binary's header against the platform it is released for (bb package /
+# bb manifest), and creates a GitHub release with the zips, their sha256
+# files, and a pod-registry manifest.edn. Other pods and the library are not
+# touched.
 
 on:
   push:
-    tags: ["pod-sqlite-v*"]
+    tags: ["pod-*-v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -22,9 +24,37 @@ env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
+# An explicit bash shell runs with -o pipefail, so `bb release-plan | tee`
+# fails the plan job when release-plan fails.
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      pod: ${{ steps.plan.outputs.pod }}
+      crate: ${{ steps.plan.outputs.crate }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: latest
+
+      # Fails unless the tag is pod-<name>-v<version> for an existing pod
+      # whose Cargo.toml has that version.
+      - name: plan
+        id: plan
+        run: bb release-plan "$TAG" | tee -a "$GITHUB_OUTPUT"
+
   build:
-    name: build ${{ matrix.target }}
+    name: build ${{ needs.plan.outputs.crate }} ${{ matrix.target }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,6 +84,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      POD: ${{ needs.plan.outputs.pod }}
+      CRATE: ${{ needs.plan.outputs.crate }}
+      EXE: target/${{ matrix.target }}/release/${{ needs.plan.outputs.crate }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,9 +105,6 @@ jobs:
         with:
           bb: latest
 
-      - name: tag matches Cargo.toml
-        run: bb check-version "$TAG"
-
       - name: install cross
         if: matrix.cross
         uses: taiki-e/install-action@v2
@@ -83,34 +114,38 @@ jobs:
       - name: build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --locked -p pod-sqlite --target "${{ matrix.target }}"
+            cross build --release --locked -p "$CRATE" --target "${{ matrix.target }}"
           else
-            cargo build --release --locked -p pod-sqlite --target "${{ matrix.target }}"
+            cargo build --release --locked -p "$CRATE" --target "${{ matrix.target }}"
           fi
 
       - name: header
-        run: bb arch target/${{ matrix.target }}/release/pod-sqlite${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: bb arch "$EXE"
 
+      # pods/<name>/test.bb reads the binary from <NAME>_POD, e.g. SQLITE_POD.
       - name: test.bb
         if: matrix.run-tests
-        env:
-          SQLITE_POD: target/${{ matrix.target }}/release/pod-sqlite${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
-          bb pods/sqlite/test.bb
-          bb pods/sqlite/test.bb socket
+          export "$(echo "$POD" | tr '[:lower:]-' '[:upper:]_')_POD=$EXE"
+          bb "pods/$POD/test.bb"
+          bb "pods/$POD/test.bb" socket
 
       - name: package
-        run: bb package --target "${{ matrix.target }}"
+        run: bb package --pod "$POD" --target "${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pod-sqlite-${{ matrix.target }}
+          name: ${{ needs.plan.outputs.crate }}-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-latest
+    env:
+      POD: ${{ needs.plan.outputs.pod }}
+      CRATE: ${{ needs.plan.outputs.crate }}
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,12 +158,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: pod-sqlite-*
+          pattern: ${{ needs.plan.outputs.crate }}-*
           merge-multiple: true
 
       # Opens every zip and checks the binary's header against its entry.
       - name: manifest
-        run: bb manifest --base-url "https://github.com/${{ github.repository }}/releases/download/${TAG}"
+        run: bb manifest --pod "$POD" --base-url "https://github.com/${{ github.repository }}/releases/download/${TAG}"
 
       - name: release
         env:
@@ -136,4 +171,4 @@ jobs:
         run: |
           gh release create "$TAG" dist/*.zip dist/*.sha256 dist/manifest.edn \
             --title "$TAG" \
-            --notes "pod-sqlite ${TAG#pod-sqlite-v}. manifest.edn is the pod-registry manifest for these assets."
+            --notes "$CRATE $VERSION. manifest.edn is the pod-registry manifest for these assets."

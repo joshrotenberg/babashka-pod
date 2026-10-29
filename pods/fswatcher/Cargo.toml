@@ -7,6 +7,11 @@ description = "A babashka pod for watching files, built on babashka-pod and noti
 license = "MIT OR Apache-2.0"
 publish = false
 
+# The pod-registry manifest written by `bb manifest` (see release/).
+[package.metadata.pod-registry]
+name = "joshrotenberg/pod-fswatcher"
+description = "Watch files, built on notify; a drop-in for org.babashka/fswatcher"
+
 [dependencies]
 babashka-pod = { path = "../.." }
 notify = "8.2"
