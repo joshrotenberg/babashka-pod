@@ -76,7 +76,10 @@ fn lang(name: &str) -> Result<&'static Lang, PodError> {
 fn lang_arg(var: &str, v: Option<&Value>) -> Result<&'static Lang, PodError> {
     match v {
         Some(Value::String(s)) => lang(s.strip_prefix(':').unwrap_or(s)),
-        _ => Err(usage(var, "a language keyword such as :rust as its first argument")),
+        _ => Err(usage(
+            var,
+            "a language keyword such as :rust as its first argument",
+        )),
     }
 }
 

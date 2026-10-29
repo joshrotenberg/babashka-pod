@@ -29,10 +29,21 @@ fn rows(lang_name: &str, src: &str) -> Vec<(String, String, usize, usize, String
 }
 
 #[allow(dead_code)]
-fn expect(rows_: &[(&str, &str, usize, usize, &str, &str)]) -> Vec<(String, String, usize, usize, String, String)> {
+fn expect(
+    rows_: &[(&str, &str, usize, usize, &str, &str)],
+) -> Vec<(String, String, usize, usize, String, String)> {
     rows_
         .iter()
-        .map(|(n, k, s, e, sig, p)| (n.to_string(), k.to_string(), *s, *e, sig.to_string(), p.to_string()))
+        .map(|(n, k, s, e, sig, p)| {
+            (
+                n.to_string(),
+                k.to_string(),
+                *s,
+                *e,
+                sig.to_string(),
+                p.to_string(),
+            )
+        })
         .collect()
 }
 
@@ -53,7 +64,15 @@ fn languages_are_sorted_and_found_by_extension() {
     {
         assert_eq!(
             names,
-            ["clojure", "go", "javascript", "python", "rust", "tsx", "typescript"]
+            [
+                "clojure",
+                "go",
+                "javascript",
+                "python",
+                "rust",
+                "tsx",
+                "typescript"
+            ]
         );
         for (path, name) in [
             ("src/lib.rs", "rust"),
@@ -65,7 +84,11 @@ fn languages_are_sorted_and_found_by_extension() {
             ("main.ts", "typescript"),
             ("main.go", "go"),
         ] {
-            assert_eq!(lang::for_path(Path::new(path)).map(|l| l.name), Some(name), "{path}");
+            assert_eq!(
+                lang::for_path(Path::new(path)).map(|l| l.name),
+                Some(name),
+                "{path}"
+            );
         }
     }
     assert!(lang::for_path(Path::new("README.md")).is_none());
@@ -77,7 +100,10 @@ fn unknown_languages_are_errors() {
     let Err(err) = lang("cobol") else {
         panic!("cobol is not a language here")
     };
-    assert!(err.message().starts_with("unknown language cobol; this pod has "));
+    assert!(
+        err.message()
+            .starts_with("unknown language cobol; this pod has ")
+    );
     assert_eq!(err.data().unwrap()["language"], "cobol");
 }
 
@@ -104,8 +130,22 @@ fn outlines_rust() {
             ("Area", "trait", 22, 24, "pub trait Area", ""),
             ("area", "method", 23, 23, "fn area(&self) -> f64", "Area"),
             ("Area for Shape", "impl", 26, 33, "impl Area for Shape", ""),
-            ("area", "method", 27, 32, "fn area(&self) -> f64", "Area for Shape"),
-            ("fmt::Display for Point", "impl", 35, 39, "impl fmt::Display for Point", ""),
+            (
+                "area",
+                "method",
+                27,
+                32,
+                "fn area(&self) -> f64",
+                "Area for Shape"
+            ),
+            (
+                "fmt::Display for Point",
+                "impl",
+                35,
+                39,
+                "impl fmt::Display for Point",
+                ""
+            ),
             (
                 "fmt",
                 "method",
@@ -114,9 +154,23 @@ fn outlines_rust() {
                 "fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result",
                 "fmt::Display for Point",
             ),
-            ("add", "function", 41, 46, "pub fn add(a: i32, b: i32) -> i32", ""),
+            (
+                "add",
+                "function",
+                41,
+                46,
+                "pub fn add(a: i32, b: i32) -> i32",
+                ""
+            ),
             ("inner", "module", 48, 50, "mod inner", ""),
-            ("helper", "function", 49, 49, "pub(crate) fn helper()", "inner"),
+            (
+                "helper",
+                "function",
+                49,
+                49,
+                "pub(crate) fn helper()",
+                "inner"
+            ),
             ("square", "macro", 52, 56, "macro_rules! square", ""),
         ])
     );
@@ -134,9 +188,23 @@ fn outlines_clojure() {
             ("add", "function", 9, 12, "(defn add [a b])", ""),
             ("shout", "function", 14, 15, "(defn- shout [s])", ""),
             ("area", "function", 17, 19, "(defn area ([w]) ([w h]))", ""),
-            ("unless", "macro", 21, 22, "(defmacro unless [test & body])", ""),
+            (
+                "unless",
+                "macro",
+                21,
+                22,
+                "(defmacro unless [test & body])",
+                ""
+            ),
             ("describe", "function", 24, 24, "(defmulti describe)", ""),
-            ("describe", "method", 26, 27, "(defmethod describe :circle [shape])", ""),
+            (
+                "describe",
+                "method",
+                26,
+                27,
+                "(defmethod describe :circle [shape])",
+                ""
+            ),
             ("Shape", "interface", 29, 30, "(defprotocol Shape)", ""),
             ("Square", "type", 32, 34, "(defrecord Square [side])", ""),
         ])
@@ -150,7 +218,14 @@ fn clojure_defmethod_dispatch_vectors_are_not_arguments() {
     assert_eq!(
         rows("clojure", src),
         expect(&[
-            ("area", "method", 1, 1, "(defmethod area [:circle :big] [shape])", ""),
+            (
+                "area",
+                "method",
+                1,
+                1,
+                "(defmethod area [:circle :big] [shape])",
+                ""
+            ),
             ("adds", "test", 2, 2, "(deftest adds)", ""),
         ])
     );
@@ -165,11 +240,39 @@ fn outlines_python() {
             ("LIMIT", "variable", 5, 5, "LIMIT = 10", ""),
             ("add", "function", 8, 9, "def add(a, b):", ""),
             ("Shape", "class", 12, 20, "class Shape:", ""),
-            ("__init__", "method", 15, 16, "def __init__(self, name):", "Shape"),
-            ("area", "method", 19, 20, "def area(self) -> float:", "Shape"),
+            (
+                "__init__",
+                "method",
+                15,
+                16,
+                "def __init__(self, name):",
+                "Shape"
+            ),
+            (
+                "area",
+                "method",
+                19,
+                20,
+                "def area(self) -> float:",
+                "Shape"
+            ),
             ("Circle", "class", 23, 29, "class Circle(Shape):", ""),
-            ("__init__", "method", 24, 26, "def __init__(self, r):", "Circle"),
-            ("area", "method", 28, 29, "def area(self) -> float:", "Circle"),
+            (
+                "__init__",
+                "method",
+                24,
+                26,
+                "def __init__(self, r):",
+                "Circle"
+            ),
+            (
+                "area",
+                "method",
+                28,
+                29,
+                "def area(self) -> float:",
+                "Circle"
+            ),
             (
                 "fetch",
                 "function",
@@ -191,9 +294,23 @@ fn outlines_javascript() {
             ("add", "function", 7, 9, "export function add(a, b)", ""),
             ("count", "function", 11, 13, "function* count(n)", ""),
             ("square", "function", 15, 15, "const square = (x) =>", ""),
-            ("load", "function", 17, 19, "const load = async function (path)", ""),
+            (
+                "load",
+                "function",
+                17,
+                19,
+                "const load = async function (path)",
+                ""
+            ),
             ("Shape", "class", 21, 33, "export class Shape", ""),
-            ("constructor", "method", 22, 24, "constructor(name)", "Shape"),
+            (
+                "constructor",
+                "method",
+                22,
+                24,
+                "constructor(name)",
+                "Shape"
+            ),
             ("area", "method", 26, 28, "area()", "Shape"),
             ("unit", "method", 30, 32, "static unit()", "Shape"),
         ])
@@ -207,18 +324,67 @@ fn outlines_typescript() {
         rows("typescript", &fixture("sample.ts")),
         expect(&[
             ("Point", "interface", 3, 6, "export interface Point", ""),
-            ("Pair", "type", 8, 8, "export type Pair = [number, number]", ""),
+            (
+                "Pair",
+                "type",
+                8,
+                8,
+                "export type Pair = [number, number]",
+                ""
+            ),
             ("Color", "enum", 10, 13, "export enum Color", ""),
-            ("add", "function", 15, 17, "export function add(a: number, b: number): number", ""),
-            ("square", "function", 19, 19, "export const square = (x: number): number =>", ""),
+            (
+                "add",
+                "function",
+                15,
+                17,
+                "export function add(a: number, b: number): number",
+                ""
+            ),
+            (
+                "square",
+                "function",
+                19,
+                19,
+                "export const square = (x: number): number =>",
+                ""
+            ),
             ("Shape", "class", 21, 27, "export abstract class Shape", ""),
             ("area", "method", 22, 22, "abstract area(): number", "Shape"),
             ("describe", "method", 24, 26, "describe(): string", "Shape"),
-            ("Circle", "class", 29, 37, "export class Circle extends Shape", ""),
-            ("constructor", "method", 30, 32, "constructor(private r: number)", "Circle"),
+            (
+                "Circle",
+                "class",
+                29,
+                37,
+                "export class Circle extends Shape",
+                ""
+            ),
+            (
+                "constructor",
+                "method",
+                30,
+                32,
+                "constructor(private r: number)",
+                "Circle"
+            ),
             ("area", "method", 34, 36, "area(): number", "Circle"),
-            ("Geometry", "module", 39, 43, "export namespace Geometry", ""),
-            ("origin", "function", 40, 42, "export function origin(): Point", "Geometry"),
+            (
+                "Geometry",
+                "module",
+                39,
+                43,
+                "export namespace Geometry",
+                ""
+            ),
+            (
+                "origin",
+                "function",
+                40,
+                42,
+                "export function origin(): Point",
+                "Geometry"
+            ),
         ])
     );
 }
@@ -229,7 +395,14 @@ fn outlines_tsx() {
     let src = "export function App(props: Props) {\n  return <div>{props.name}</div>;\n}\n";
     assert_eq!(
         rows("tsx", src),
-        expect(&[("App", "function", 1, 3, "export function App(props: Props)", "")])
+        expect(&[(
+            "App",
+            "function",
+            1,
+            3,
+            "export function App(props: Props)",
+            ""
+        )])
     );
 }
 
@@ -246,7 +419,14 @@ fn outlines_go() {
             ("Area", "method", 16, 16, "Area() float64", "Shape"),
             ("Celsius", "type", 19, 19, "type Celsius float64", ""),
             ("Circle", "struct", 21, 23, "type Circle struct", ""),
-            ("Area", "method", 25, 27, "func (c *Circle) Area() float64", "Circle"),
+            (
+                "Area",
+                "method",
+                25,
+                27,
+                "func (c *Circle) Area() float64",
+                "Circle"
+            ),
             ("Add", "function", 29, 31, "func Add(a, b int) int", ""),
         ])
     );
@@ -262,7 +442,10 @@ fn parses_to_tree_data_and_sexp() {
     assert_eq!(f["type"], "function_item");
     assert_eq!(f["start"], json!([1, 0]));
     assert_eq!(f["end"], json!([1, 9]));
-    assert_eq!(f["children"][0], json!({"type": "identifier", "field": "name", "start": [1, 3], "end": [1, 4], "text": "f"}));
+    assert_eq!(
+        f["children"][0],
+        json!({"type": "identifier", "field": "name", "start": [1, 3], "end": [1, 4], "text": "f"})
+    );
     assert_eq!(f["children"][2]["field"], "body");
 
     let sexp = parse(vec![json!("rust"), json!(src), json!({"as": "sexp"})]).unwrap();
@@ -294,7 +477,8 @@ fn queries_return_captures_in_document_order() {
 
     let err = query(lang("rust").unwrap(), src, "(function_item name: (nope))").unwrap_err();
     assert!(
-        err.message().starts_with("rust query: unknown node type at row 1, column "),
+        err.message()
+            .starts_with("rust query: unknown node type at row 1, column "),
         "{}",
         err.message()
     );

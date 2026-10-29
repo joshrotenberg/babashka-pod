@@ -45,7 +45,14 @@ fn squash(s: &str) -> String {
 /// leave inside brackets: `fn f( a: i32, b: i32, )` becomes `fn f(a: i32, b: i32)`.
 fn squash_code(s: &str) -> String {
     let mut s = squash(s);
-    for (from, to) in [("( ", "("), ("[ ", "["), (" )", ")"), (" ]", "]"), (",)", ")"), (",]", "]")] {
+    for (from, to) in [
+        ("( ", "("),
+        ("[ ", "["),
+        (" )", ")"),
+        (" ]", "]"),
+        (",)", ")"),
+        (",]", "]"),
+    ] {
         s = s.replace(from, to);
     }
     s
