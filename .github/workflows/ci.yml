@@ -39,6 +39,11 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # Builds the crate from its packaged files, so a file missing from the
+      # include list in Cargo.toml fails here instead of in the release.
+      - name: package
+        run: cargo publish -p babashka-pod --dry-run
+
       # Release tooling (bb.edn, release/): header parsing and manifest checks.
       - name: release tooling tests
         run: bb release-test
