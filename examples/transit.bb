@@ -24,6 +24,7 @@
 (show "kw-info" (tr/kw-info :my.ns/thing))
 (show "plus-days" (tr/plus-days #inst "2026-10-14T00:00:00.000-00:00" 1))
 (show "point" (tr/point 3 4))
+(show "ping" (tr/ping))
 (show "meta-of" (tr/meta-of ^{:source :repl} {:a 1}))
 (show "meta-of plain" (tr/meta-of {:a 1}))
 (try

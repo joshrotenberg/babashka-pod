@@ -16,6 +16,8 @@
 
 (println "transport:" transport)
 (println "add:" (ex/add 1 2 3.5))
+(println "add no args:" (ex/add))
+(println "ping:" (ex/ping))
 (println "greet:" (ex/greet "babashka"))
 (println "doc:" (:doc (meta #'ex/add)))
 
