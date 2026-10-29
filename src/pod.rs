@@ -21,7 +21,9 @@ const DEFAULT_GRACE: Duration = Duration::from_secs(2);
 
 type Json = serde_json::Value;
 
-type Handler = Arc<dyn Fn(Json, Emitter) -> Result<Option<Json>, PodError> + Send + Sync>;
+/// A registered var's handler. It gets the argument payload as sent and
+/// decodes it itself, so each var decodes into the form it asked for.
+type Handler = Arc<dyn Fn(&str, Format, Emitter) -> Result<Option<Json>, PodError> + Send + Sync>;
 
 /// The payload format: how arguments, return values and `ex-data` are
 /// encoded inside the bencode messages.
@@ -215,9 +217,32 @@ impl Namespace {
     {
         let name = name.into();
         let qualified = format!("{}/{}", self.name, name);
-        let handler: Handler = Arc::new(move |args, _tx| {
-            let args = decode_args(&qualified, args)?;
+        let handler: Handler = Arc::new(move |raw, format, _tx| {
+            let args = decode_args(&qualified, json_args(&qualified, raw, format)?)?;
             let value = f(args)?;
+            serde_json::to_value(&value)
+                .map(Some)
+                .map_err(PodError::from)
+        });
+        self.push(name, VarKind::Handler(handler))
+    }
+
+    /// Registers a function whose arguments keep their Clojure types.
+    ///
+    /// Like [`function`](Self::function), but the handler gets the argument
+    /// vector as [`transit::Value`]s: keywords, symbols, chars, big numbers,
+    /// ratios, lists, sets and maps with any keys stay distinct. Under
+    /// [`Format::Json`], which cannot carry those types, the arguments are
+    /// built from the plain JSON.
+    pub fn function_transit<R, F>(self, name: impl Into<String>, f: F) -> Self
+    where
+        R: Serialize,
+        F: Fn(Vec<transit::Value>) -> Result<R, PodError> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let qualified = format!("{}/{}", self.name, name);
+        let handler: Handler = Arc::new(move |raw, format, _tx| {
+            let value = f(tree_args(&qualified, raw, format)?)?;
             serde_json::to_value(&value)
                 .map(Some)
                 .map_err(PodError::from)
@@ -238,9 +263,25 @@ impl Namespace {
     {
         let name = name.into();
         let qualified = format!("{}/{}", self.name, name);
-        let handler: Handler = Arc::new(move |args, tx| {
-            let args = decode_args(&qualified, args)?;
+        let handler: Handler = Arc::new(move |raw, format, tx| {
+            let args = decode_args(&qualified, json_args(&qualified, raw, format)?)?;
             f(args, tx)?;
+            Ok(None)
+        });
+        self.push(name, VarKind::Handler(handler))
+    }
+
+    /// Registers a streaming function whose arguments keep their Clojure
+    /// types: [`stream`](Self::stream) with arguments as in
+    /// [`function_transit`](Self::function_transit).
+    pub fn stream_transit<F>(self, name: impl Into<String>, f: F) -> Self
+    where
+        F: Fn(Vec<transit::Value>, Emitter) -> Result<(), PodError> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let qualified = format!("{}/{}", self.name, name);
+        let handler: Handler = Arc::new(move |raw, format, tx| {
+            f(tree_args(&qualified, raw, format)?, tx)?;
             Ok(None)
         });
         self.push(name, VarKind::Handler(handler))
@@ -264,6 +305,19 @@ impl Namespace {
         let name = name.into();
         let raw = format!("{name}*");
         self.stream(raw.clone(), f)
+            .push(name, VarKind::StreamWrapper { raw })
+    }
+
+    /// Registers a streaming function and its client-side wrapper, with
+    /// arguments that keep their Clojure types: [`stream_fn`](Self::stream_fn)
+    /// with arguments as in [`function_transit`](Self::function_transit).
+    pub fn stream_fn_transit<F>(self, name: impl Into<String>, f: F) -> Self
+    where
+        F: Fn(Vec<transit::Value>, Emitter) -> Result<(), PodError> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let raw = format!("{name}*");
+        self.stream_transit(raw.clone(), f)
             .push(name, VarKind::StreamWrapper { raw })
     }
 
@@ -412,6 +466,36 @@ impl Namespace {
                 })
                 .collect(),
         )
+    }
+}
+
+fn bad_payload(var: &str, raw: &str, e: impl std::fmt::Display) -> PodError {
+    PodError::new(format!("invalid arguments for {var}: {e}"))
+        .with_data(serde_json::json!({ "var": var, "args": raw }))
+}
+
+/// Decodes an argument payload in the pod's format into JSON.
+fn json_args(var: &str, raw: &str, format: Format) -> Result<Json, PodError> {
+    format.decode(raw).map_err(|e| bad_payload(var, raw, e))
+}
+
+/// Decodes an argument payload into transit values. babashka sends nil, not
+/// [], for a call with no arguments.
+fn tree_args(var: &str, raw: &str, format: Format) -> Result<Vec<transit::Value>, PodError> {
+    let decoded = match format {
+        Format::TransitJson => transit::read(raw).map_err(|e| e.to_string()),
+        Format::Json => serde_json::from_str::<Json>(raw)
+            .map(|j| transit::Value::from(&j))
+            .map_err(|e| e.to_string()),
+    };
+    match decoded.map_err(|e| bad_payload(var, raw, e))? {
+        transit::Value::Nil => Ok(Vec::new()),
+        transit::Value::Vector(items) | transit::Value::List(items) => Ok(items),
+        other => Err(bad_payload(
+            var,
+            raw,
+            format!("expected an argument vector, got {other:?}"),
+        )),
     }
 }
 
@@ -618,22 +702,14 @@ fn invoke(shared: &Arc<Shared>, handlers: &HashMap<String, Handler>, msg: &Value
         shared.write(&error_reply(&id, &err, format));
         return;
     };
-    let args = match format.decode(raw_args) {
-        Ok(args) => args,
-        Err(e) => {
-            let err = PodError::new(format!("invalid arguments for {var}: {e}"))
-                .with_data(serde_json::json!({ "var": var, "args": raw_args }));
-            shared.write(&error_reply(&id, &err, format));
-            return;
-        }
-    };
+    let raw_args = raw_args.to_string();
 
     let call = shared.begin();
     let tx = Emitter::new(id.clone(), shared.clone(), call.clone());
     let spawned = thread::Builder::new()
         .name(format!("pod:{var}"))
         .spawn(move || {
-            let outcome = catch_unwind(AssertUnwindSafe(|| handler(args, tx.clone())));
+            let outcome = catch_unwind(AssertUnwindSafe(|| handler(&raw_args, format, tx.clone())));
             // The handler has returned, so cancellation no longer applies.
             tx.call.finish();
             let reply = match outcome {

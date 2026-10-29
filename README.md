@@ -88,6 +88,34 @@ Under `Format::Json` these types degrade to plain JSON (a keyword to its name, a
 an inst to millis). Values handled as an untyped `serde_json::Value` lose keyword-ness on the way
 back: a keyword that arrived as `"a"` returns as the string `"a"`.
 
+### Keeping Clojure types in arguments
+
+A handler that needs to tell a keyword from a string, a list from a vector, or `{:a 1}` from
+`{"a" 1}` registers with `function_transit`, `stream_transit` or `stream_fn_transit`. Its arguments
+arrive as `transit::Value`s, which keep every type transit carries: keywords, symbols, chars,
+`BigInt`, `BigDecimal`, ratios, lists, vectors, sets, maps with any keys, insts, uuids, URIs, bytes,
+tagged values and metadata. Returning a `transit::Value` sends it back as the same value.
+
+```rust
+use babashka_pod::transit::Value;
+use babashka_pod::{Namespace, PodError};
+
+Namespace::new("pod.example.data")
+    // (kind :a) => "keyword", (kind "a") => "string", (kind 1/3) => "ratio"
+    .function_transit("kind", |args: Vec<Value>| {
+        Ok::<_, PodError>(match args.first() {
+            Some(Value::Keyword(_)) => "keyword",
+            Some(Value::String(_)) => "string",
+            Some(Value::Ratio { .. }) => "ratio",
+            _ => "other",
+        })
+    });
+```
+
+Under `Format::Json` there are no Clojure types to keep: these handlers get the plain JSON values
+(strings, numbers, vectors, maps with string keys). babashka's transit reader reads a returned list
+as a seq, not a `PersistentList`.
+
 The transit codec (`src/transit.rs`) depends only on serde and serde_json. It reads babashka's
 transit writer output, including the key and tag cache.
 
