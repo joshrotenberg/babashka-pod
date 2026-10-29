@@ -113,8 +113,19 @@
 
 ;; --- pods ----------------------------------------------------------------
 
-(defn- unescape [s]
-  (str/replace s #"\\(.)" "$1"))
+(def ^:private toml-escapes
+  {"b" "\b" "t" "\t" "n" "\n" "f" "\f" "r" "\r" "\"" "\"" "\\" "\\"})
+
+(defn- unescape
+  "Decodes the escapes of a TOML basic string: \\b \\t \\n \\f \\r \\\" \\\\
+  \\uXXXX and \\UXXXXXXXX. Throws on any other escape."
+  [s]
+  (str/replace s #"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)"
+               (fn [[m e]]
+                 (cond
+                   (toml-escapes e) (toml-escapes e)
+                   (#{\u \U} (first e)) (String. (Character/toChars (Integer/parseInt (subs e 1) 16)))
+                   :else (throw (ex-info (str "unsupported TOML escape " m) {:babashka/exit 1}))))))
 
 (defn toml-strings
   "The string values in a Cargo.toml as {section {key value}}, with nil for

@@ -53,12 +53,14 @@
   (is (= "windows-amd64" (:slug (r/platform-for-target "x86_64-pc-windows-gnu"))))
   (is (thrown? clojure.lang.ExceptionInfo (r/platform-for-target "riscv64gc-unknown-linux-gnu"))))
 
-(defn- fake-zip [dist slug exe header-bytes]
-  (let [staging (fs/create-temp-dir)
-        bin     (fs/path staging exe)]
-    (fs/write-bytes bin header-bytes)
-    (fs/zip (fs/path dist (str "pod-sqlite-9.9.9-" slug ".zip")) [(str bin)] {:root (str staging)})
-    (fs/delete-tree staging)))
+(defn- fake-zip
+  ([dist slug exe header-bytes] (fake-zip dist "9.9.9" slug exe header-bytes))
+  ([dist version slug exe header-bytes]
+   (let [staging (fs/create-temp-dir)
+         bin     (fs/path staging exe)]
+     (fs/write-bytes bin header-bytes)
+     (fs/zip (fs/path dist (str "pod-sqlite-" version "-" slug ".zip")) [(str bin)] {:root (str staging)})
+     (fs/delete-tree staging))))
 
 (defn- run-manifest [dist]
   (with-out-str
@@ -84,6 +86,17 @@
              (:artifact/url (nth (:pod/artifacts m) 2))))
       (is (= "pod-sqlite.exe" (:artifact/executable (last (:pod/artifacts m))))))
     (fs/delete-tree dist)))
+
+(deftest manifest-defaults-come-from-cargo-toml
+  (let [dist (fs/create-temp-dir)
+        info (r/pod-info "sqlite")]
+    (fake-zip dist (:version info) "linux-amd64" "pod-sqlite" elf-x86_64)
+    (with-out-str
+      (r/manifest {:pod "sqlite" :dist (str dist) :base-url "https://example.com/dl/"}))
+    (let [m (edn/read-string (slurp (str (fs/path dist "manifest.edn"))))]
+      (is (= (symbol (:registry-name info)) (:pod/name m)))
+      (is (= (:version info) (:pod/version m)))
+      (is (= (:description info) (:pod/description m))))))
 
 (deftest manifest-refuses-a-mislabeled-binary
   (testing "an x86_64 binary filed as macos-aarch64, as in fswatcher 0.0.5"
@@ -118,6 +131,12 @@
     (is (= {"name" "me/pod-x" "description" "Says \"x\""}
            (get t "package.metadata.pod-registry")))
     (is (= "not-the-package" (get-in t ["dependencies" "name"])))))
+
+(deftest decodes-toml-escapes
+  (is (= {"d" "a\tb\nc \\ \u00e9 \uD83D\uDE00"}
+         (get (r/toml-strings "[s]\nd = \"a\\tb\\nc \\\\ \\u00e9 \\U0001F600\"\n") "s")))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unsupported TOML escape"
+                        (r/toml-strings "[s]\nd = \"\\q\"\n"))))
 
 (deftest reads-pod-info-from-the-workspace
   (doseq [pod ["sqlite" "fswatcher"]]
