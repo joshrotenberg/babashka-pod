@@ -1,0 +1,18 @@
+[workspace]
+changelog_update = true
+changelog_config = "cliff.toml"
+git_release_enable = true
+git_tag_enable = true
+pr_labels = ["release"]
+pr_draft = false
+publish_allow_dirty = false
+publish_no_verify = false
+publish_timeout = "10m"
+
+[[package]]
+name = "babashka-pod"
+semver_check = true
+release = true
+publish = true
+git_tag_name = "v{{ version }}"
+changelog_path = "CHANGELOG.md"
