@@ -23,7 +23,7 @@ use std::fmt;
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Number, Value as Json};
 
 /// Key of the single-entry object that marks a transit value inside a
 /// `serde_json::Value`. The NUL byte keeps it from colliding with real keys.
@@ -53,8 +53,8 @@ impl std::error::Error for DecodeError {}
 // ---------------------------------------------------------------------------
 
 /// Decodes transit+json text into a `serde_json::Value`.
-pub fn decode(text: &str) -> Result<Value, DecodeError> {
-    let json: Value = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
+pub fn decode(text: &str) -> Result<Json, DecodeError> {
+    let json: Json = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
     let mut reader = Reader {
         cache: Vec::new(),
         next: 0,
@@ -94,20 +94,20 @@ impl Reader {
         Ok(s.to_string())
     }
 
-    fn value(&mut self, v: &Value) -> Result<Value, DecodeError> {
+    fn value(&mut self, v: &Json) -> Result<Json, DecodeError> {
         match v {
-            Value::String(s) => {
+            Json::String(s) => {
                 let raw = self.resolve(s, false)?;
                 scalar(&raw)
             }
-            Value::Array(items) => self.array(items),
-            Value::Object(obj) => self.verbose_map(obj),
+            Json::Array(items) => self.array(items),
+            Json::Object(obj) => self.verbose_map(obj),
             other => Ok(other.clone()),
         }
     }
 
-    fn array(&mut self, items: &[Value]) -> Result<Value, DecodeError> {
-        let Some(Value::String(first)) = items.first() else {
+    fn array(&mut self, items: &[Json]) -> Result<Json, DecodeError> {
+        let Some(Json::String(first)) = items.first() else {
             return items.iter().map(|v| self.value(v)).collect();
         };
         let head = self.resolve(first, false)?;
@@ -122,7 +122,7 @@ impl Reader {
                 let value = self.value(&pair[1])?;
                 map.insert(key, value);
             }
-            return Ok(Value::Object(map));
+            return Ok(Json::Object(map));
         }
         if let Some(tag) = head.strip_prefix("~#") {
             if items.len() != 2 {
@@ -134,12 +134,12 @@ impl Reader {
         for v in &items[1..] {
             out.push(self.value(v)?);
         }
-        Ok(Value::Array(out))
+        Ok(Json::Array(out))
     }
 
     /// A map written as a JSON object (transit's verbose mode), or a verbose
     /// tagged value `{"~#tag": rep}`.
-    fn verbose_map(&mut self, obj: &Map<String, Value>) -> Result<Value, DecodeError> {
+    fn verbose_map(&mut self, obj: &Map<String, Json>) -> Result<Json, DecodeError> {
         if obj.len() == 1 {
             let (k, v) = obj.iter().next().unwrap();
             if let Some(tag) = k.strip_prefix("~#") {
@@ -148,51 +148,51 @@ impl Reader {
         }
         let mut map = Map::new();
         for (k, v) in obj {
-            let key = self.key(&Value::String(k.clone()))?;
+            let key = self.key(&Json::String(k.clone()))?;
             map.insert(key, self.value(v)?);
         }
-        Ok(Value::Object(map))
+        Ok(Json::Object(map))
     }
 
-    fn key(&mut self, k: &Value) -> Result<String, DecodeError> {
+    fn key(&mut self, k: &Json) -> Result<String, DecodeError> {
         let decoded = match k {
-            Value::String(s) => {
+            Json::String(s) => {
                 let raw = self.resolve(s, true)?;
                 scalar(&raw)?
             }
             other => self.value(other)?,
         };
         Ok(match decoded {
-            Value::String(s) => s,
+            Json::String(s) => s,
             other => other.to_string(),
         })
     }
 
-    fn tagged(&mut self, tag: &str, rep: &Value) -> Result<Value, DecodeError> {
+    fn tagged(&mut self, tag: &str, rep: &Json) -> Result<Json, DecodeError> {
         match tag {
             "set" | "list" => match self.value(rep)? {
-                arr @ Value::Array(_) => Ok(arr),
+                arr @ Json::Array(_) => Ok(arr),
                 other => Err(DecodeError(format!("{tag} of a non-array: {other}"))),
             },
             // A map whose keys are not all strings: decoded to [[k v] ...].
             "cmap" => {
-                let Value::Array(flat) = self.value(rep)? else {
+                let Json::Array(flat) = self.value(rep)? else {
                     return Err(DecodeError("cmap of a non-array".into()));
                 };
-                Ok(Value::Array(
-                    flat.chunks(2).map(|kv| Value::Array(kv.to_vec())).collect(),
+                Ok(Json::Array(
+                    flat.chunks(2).map(|kv| Json::Array(kv.to_vec())).collect(),
                 ))
             }
             "with-meta" => {
-                let Value::Array(pair) = self.value(rep)? else {
+                let Json::Array(pair) = self.value(rep)? else {
                     return Err(DecodeError("with-meta of a non-array".into()));
                 };
-                let [value, meta] = <[Value; 2]>::try_from(pair)
+                let [value, meta] = <[Json; 2]>::try_from(pair)
                     .map_err(|_| DecodeError("with-meta needs [value meta]".into()))?;
                 Ok(marker("with-meta", vec![value, meta]))
             }
             "ratio" => {
-                let Value::Array(nd) = self.value(rep)? else {
+                let Json::Array(nd) = self.value(rep)? else {
                     return Err(DecodeError("ratio of a non-array".into()));
                 };
                 let (n, d) = match nd.as_slice() {
@@ -201,24 +201,24 @@ impl Reader {
                 };
                 match (n, d) {
                     (Some(n), Some(d)) => Ok(Number::from_f64(n / d)
-                        .map(Value::Number)
-                        .unwrap_or(Value::Null)),
+                        .map(Json::Number)
+                        .unwrap_or(Json::Null)),
                     _ => Err(DecodeError("ratio needs [numerator denominator]".into())),
                 }
             }
             "'" => self.value(rep),
             other => {
                 let rep = self.value(rep)?;
-                Ok(marker("tagged", vec![Value::from(other), rep]))
+                Ok(marker("tagged", vec![Json::from(other), rep]))
             }
         }
     }
 }
 
-fn as_f64(v: &Value) -> Option<f64> {
+fn as_f64(v: &Json) -> Option<f64> {
     match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
+        Json::Number(n) => n.as_f64(),
+        Json::String(s) => s.parse().ok(),
         _ => None,
     }
 }
@@ -238,42 +238,42 @@ fn cache_index(code: &str) -> Option<usize> {
 }
 
 /// Decodes a non-cache transit string.
-fn scalar(raw: &str) -> Result<Value, DecodeError> {
+fn scalar(raw: &str) -> Result<Json, DecodeError> {
     let mut chars = raw.chars();
     if chars.next() != Some('~') {
-        return Ok(Value::String(raw.to_string()));
+        return Ok(Json::String(raw.to_string()));
     }
     let Some(kind) = chars.next() else {
-        return Ok(Value::String(raw.to_string()));
+        return Ok(Json::String(raw.to_string()));
     };
     let body = &raw[2..];
     let bad = || DecodeError(format!("bad transit scalar {raw:?}"));
     Ok(match kind {
-        '~' | '^' | '`' => Value::String(raw[1..].to_string()),
-        ':' | '$' | 'u' | 'r' | 'c' | 'n' | 'f' | 't' => Value::String(body.to_string()),
+        '~' | '^' | '`' => Json::String(raw[1..].to_string()),
+        ':' | '$' | 'u' | 'r' | 'c' | 'n' | 'f' | 't' => Json::String(body.to_string()),
         // Kept as a marker so a blob is not mistaken for text.
-        'b' => marker("bytes", vec![Value::String(body.to_string())]),
-        'm' => Value::from(body.parse::<i64>().map_err(|_| bad())?),
+        'b' => marker("bytes", vec![Json::String(body.to_string())]),
+        'm' => Json::from(body.parse::<i64>().map_err(|_| bad())?),
         'i' => match (body.parse::<i64>(), body.parse::<u64>()) {
-            (Ok(n), _) => Value::from(n),
-            (_, Ok(n)) => Value::from(n),
-            _ => Value::String(body.to_string()),
+            (Ok(n), _) => Json::from(n),
+            (_, Ok(n)) => Json::from(n),
+            _ => Json::String(body.to_string()),
         },
         'd' => body
             .parse::<f64>()
             .ok()
             .and_then(Number::from_f64)
-            .map(Value::Number)
+            .map(Json::Number)
             .ok_or_else(bad)?,
         '?' => match body {
-            "t" => Value::Bool(true),
-            "f" => Value::Bool(false),
+            "t" => Json::Bool(true),
+            "f" => Json::Bool(false),
             _ => return Err(bad()),
         },
-        '_' => Value::Null,
+        '_' => Json::Null,
         // NaN and infinities have no JSON number form.
-        'z' => Value::String(body.to_string()),
-        _ => Value::String(raw.to_string()),
+        'z' => Json::String(body.to_string()),
+        _ => Json::String(raw.to_string()),
     })
 }
 
@@ -283,28 +283,28 @@ fn scalar(raw: &str) -> Result<Value, DecodeError> {
 
 /// Encodes a `serde_json::Value`, including marker objects from this
 /// module's types, as transit+json text.
-pub fn encode(v: &Value) -> String {
+pub fn encode(v: &Json) -> String {
     encode_value(v).to_string()
 }
 
-fn encode_value(v: &Value) -> Value {
+fn encode_value(v: &Json) -> Json {
     match v {
-        Value::String(s) => Value::String(escape(s)),
-        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-            (Some(i), _) if i.unsigned_abs() > MAX_JSON_INT => Value::String(format!("~i{i}")),
-            (None, Some(u)) if u > MAX_JSON_INT => Value::String(format!("~i{u}")),
+        Json::String(s) => Json::String(escape(s)),
+        Json::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) if i.unsigned_abs() > MAX_JSON_INT => Json::String(format!("~i{i}")),
+            (None, Some(u)) if u > MAX_JSON_INT => Json::String(format!("~i{u}")),
             _ => v.clone(),
         },
-        Value::Array(items) => Value::Array(items.iter().map(encode_value).collect()),
-        Value::Object(obj) => match as_marker(obj) {
+        Json::Array(items) => Json::Array(items.iter().map(encode_value).collect()),
+        Json::Object(obj) => match as_marker(obj) {
             Some((kind, args)) => encode_marker(kind, args),
             None => {
-                let mut out = vec![Value::from("^ ")];
+                let mut out = vec![Json::from("^ ")];
                 for (k, v) in obj {
-                    out.push(Value::String(format!("~:{k}")));
+                    out.push(Json::String(format!("~:{k}")));
                     out.push(encode_value(v));
                 }
-                Value::Array(out)
+                Json::Array(out)
             }
         },
         other => other.clone(),
@@ -319,25 +319,25 @@ fn escape(s: &str) -> String {
     }
 }
 
-fn encode_marker(kind: &str, args: &[Value]) -> Value {
-    let text = |i: usize| args.get(i).and_then(Value::as_str).unwrap_or_default();
-    let tagged = |tag: &str, rep: Value| Value::Array(vec![Value::String(format!("~#{tag}")), rep]);
+fn encode_marker(kind: &str, args: &[Json]) -> Json {
+    let text = |i: usize| args.get(i).and_then(Json::as_str).unwrap_or_default();
+    let tagged = |tag: &str, rep: Json| Json::Array(vec![Json::String(format!("~#{tag}")), rep]);
     match kind {
-        "keyword" => Value::String(format!("~:{}", text(0))),
-        "symbol" => Value::String(format!("~${}", text(0))),
-        "uuid" => Value::String(format!("~u{}", text(0))),
-        "bytes" => Value::String(format!("~b{}", text(0))),
-        "inst" => Value::String(format!(
+        "keyword" => Json::String(format!("~:{}", text(0))),
+        "symbol" => Json::String(format!("~${}", text(0))),
+        "uuid" => Json::String(format!("~u{}", text(0))),
+        "bytes" => Json::String(format!("~b{}", text(0))),
+        "inst" => Json::String(format!(
             "~m{}",
-            args.first().and_then(Value::as_i64).unwrap_or_default()
+            args.first().and_then(Json::as_i64).unwrap_or_default()
         )),
-        "set" => tagged("set", encode_value(args.first().unwrap_or(&Value::Null))),
-        "tagged" => tagged(text(0), encode_value(args.get(1).unwrap_or(&Value::Null))),
+        "set" => tagged("set", encode_value(args.first().unwrap_or(&Json::Null))),
+        "tagged" => tagged(text(0), encode_value(args.get(1).unwrap_or(&Json::Null))),
         "with-meta" => tagged(
             "with-meta",
-            Value::Array(args.iter().take(2).map(encode_value).collect()),
+            Json::Array(args.iter().take(2).map(encode_value).collect()),
         ),
-        _ => Value::Null,
+        _ => Json::Null,
     }
 }
 
@@ -345,18 +345,18 @@ fn encode_marker(kind: &str, args: &[Value]) -> Value {
 /// keywords, symbols and uuids become strings, bytes become base64 strings,
 /// sets become arrays, insts become epoch milliseconds, tagged values become `{"tag": .., "rep": ..}`,
 /// and `with-meta` drops the metadata.
-pub fn to_plain_json(v: &Value) -> Value {
+pub fn to_plain_json(v: &Json) -> Json {
     match v {
-        Value::Array(items) => Value::Array(items.iter().map(to_plain_json).collect()),
-        Value::Object(obj) => match as_marker(obj) {
+        Json::Array(items) => Json::Array(items.iter().map(to_plain_json).collect()),
+        Json::Object(obj) => match as_marker(obj) {
             Some((kind, args)) => {
-                let arg = |i: usize| args.get(i).map(to_plain_json).unwrap_or(Value::Null);
+                let arg = |i: usize| args.get(i).map(to_plain_json).unwrap_or(Json::Null);
                 match kind {
                     "tagged" => serde_json::json!({ "tag": arg(0), "rep": arg(1) }),
                     _ => arg(0),
                 }
             }
-            None => Value::Object(
+            None => Json::Object(
                 obj.iter()
                     .map(|(k, v)| (k.clone(), to_plain_json(v)))
                     .collect(),
@@ -366,19 +366,19 @@ pub fn to_plain_json(v: &Value) -> Value {
     }
 }
 
-fn marker(kind: &str, args: Vec<Value>) -> Value {
-    let mut items = vec![Value::from(kind)];
+fn marker(kind: &str, args: Vec<Json>) -> Json {
+    let mut items = vec![Json::from(kind)];
     items.extend(args);
     let mut map = Map::new();
-    map.insert(MARKER.to_string(), Value::Array(items));
-    Value::Object(map)
+    map.insert(MARKER.to_string(), Json::Array(items));
+    Json::Object(map)
 }
 
-fn as_marker(obj: &Map<String, Value>) -> Option<(&str, &[Value])> {
+fn as_marker(obj: &Map<String, Json>) -> Option<(&str, &[Json])> {
     if obj.len() != 1 {
         return None;
     }
-    let Value::Array(items) = obj.get(MARKER)? else {
+    let Json::Array(items) = obj.get(MARKER)? else {
         return None;
     };
     let (kind, args) = items.split_first()?;
@@ -386,7 +386,7 @@ fn as_marker(obj: &Map<String, Value>) -> Option<(&str, &[Value])> {
 }
 
 // ---------------------------------------------------------------------------
-// Value types
+// Json types
 // ---------------------------------------------------------------------------
 
 /// Serializes `{MARKER: [kind, args...]}`. `items` is a tuple whose first
@@ -520,9 +520,9 @@ impl Bytes {
     /// Reads bytes from a decoded argument that may hold them, for handlers
     /// that take untyped `serde_json::Value` arguments. Only the transit byte
     /// marker matches; a plain string is left as text.
-    pub fn from_json(v: &Value) -> Option<Bytes> {
+    pub fn from_json(v: &Json) -> Option<Bytes> {
         match v.as_object().and_then(as_marker) {
-            Some(("bytes", [Value::String(b64)])) => base64_decode(b64).map(Bytes),
+            Some(("bytes", [Json::String(b64)])) => base64_decode(b64).map(Bytes),
             _ => None,
         }
     }
@@ -536,10 +536,10 @@ impl Serialize for Bytes {
 
 impl<'de> Deserialize<'de> for Bytes {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = Value::deserialize(d)?;
+        let v = Json::deserialize(d)?;
         let b64 = match (&v, v.as_object().and_then(as_marker)) {
-            (_, Some(("bytes", [Value::String(b64)]))) => b64.as_str(),
-            (Value::String(b64), _) => b64.as_str(),
+            (_, Some(("bytes", [Json::String(b64)]))) => b64.as_str(),
+            (Json::String(b64), _) => b64.as_str(),
             _ => return Err(de::Error::custom(format!("expected bytes, got {v}"))),
         };
         base64_decode(b64)
@@ -596,7 +596,7 @@ pub struct Tagged {
     /// The tag, without `~#`.
     pub tag: String,
     /// The value's representation.
-    pub rep: Value,
+    pub rep: Json,
 }
 
 impl Serialize for Tagged {
@@ -607,9 +607,9 @@ impl Serialize for Tagged {
 
 impl<'de> Deserialize<'de> for Tagged {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = Value::deserialize(d)?;
+        let v = Json::deserialize(d)?;
         match v.as_object().and_then(as_marker) {
-            Some(("tagged", [Value::String(tag), rep])) => Ok(Tagged {
+            Some(("tagged", [Json::String(tag), rep])) => Ok(Tagged {
                 tag: tag.clone(),
                 rep: rep.clone(),
             }),
@@ -631,7 +631,7 @@ pub struct WithMeta<T> {
     /// The value.
     pub value: T,
     /// Its metadata map, if it had any.
-    pub meta: Option<Value>,
+    pub meta: Option<Json>,
 }
 
 impl<T: Serialize> Serialize for WithMeta<T> {
@@ -645,7 +645,7 @@ impl<T: Serialize> Serialize for WithMeta<T> {
 
 impl<'de, T: DeserializeOwned> Deserialize<'de> for WithMeta<T> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = Value::deserialize(d)?;
+        let v = Json::deserialize(d)?;
         if let Some(("with-meta", [value, meta])) = v.as_object().and_then(as_marker) {
             let value = serde_json::from_value(value.clone()).map_err(de::Error::custom)?;
             return Ok(WithMeta {
@@ -718,7 +718,7 @@ mod tests {
             json!([[[1, 2], "composite"]])
         );
         let v = decode(r#"[["~#with-meta",[["^ ","~:a",1],["^ ","~:tag","~:x"]]],2]"#).unwrap();
-        let (first, second): (WithMeta<Value>, WithMeta<i64>) = serde_json::from_value(v).unwrap();
+        let (first, second): (WithMeta<Json>, WithMeta<i64>) = serde_json::from_value(v).unwrap();
         assert_eq!(first.value, json!({"a": 1}));
         assert_eq!(first.meta, Some(json!({"tag": "x"})));
         assert_eq!(
