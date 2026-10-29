@@ -69,7 +69,8 @@ pub fn is_pod_mode() -> bool {
 
 /// Arguments for a function that takes none.
 ///
-/// Deserializes only from an empty argument vector.
+/// Deserializes only from an empty argument vector. babashka sends `nil` for a
+/// call with no arguments; the runtime passes it to handlers as an empty vector.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoArgs;
 
@@ -415,6 +416,12 @@ impl Namespace {
 }
 
 fn decode_args<A: DeserializeOwned>(var: &str, args: Json) -> Result<A, PodError> {
+    // babashka sends nil, not [], for a call with no arguments.
+    let args = if args.is_null() {
+        Json::Array(vec![])
+    } else {
+        args
+    };
     serde_json::from_value(args.clone()).map_err(|e| {
         PodError::new(format!("invalid arguments for {var}: {e}"))
             .with_data(serde_json::json!({ "var": var, "args": args }))

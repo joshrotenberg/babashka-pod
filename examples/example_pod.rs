@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use babashka_pod::serde_json::json;
-use babashka_pod::{Emitter, Handle, Handles, Namespace, Pod, PodError};
+use babashka_pod::{Emitter, Handle, Handles, Namespace, NoArgs, Pod, PodError};
 
 const NS: &str = "pod.joshrotenberg.example";
 
@@ -20,10 +20,14 @@ fn main() {
 
     let ns = Namespace::new(NS)
         .function("add", |nums: Vec<f64>| {
-            Ok::<_, PodError>(nums.iter().sum::<f64>())
+            // Folds from 0.0: f64's Sum starts at -0.0, so (add) would return -0.0.
+            Ok::<_, PodError>(nums.iter().fold(0.0, |a, b| a + b))
         })
         .doc("add", "Adds any number of numbers.")
         .arglists("add", ["[& nums]"])
+        .function("ping", |_: NoArgs| Ok::<_, PodError>("pong"))
+        .doc("ping", "Returns \"pong\". Takes no arguments.")
+        .arglists("ping", ["[]"])
         .function("greet", |(name,): (String,)| {
             Ok::<_, PodError>(json!({ "greeting": format!("hello, {name}"), "length": name.len() }))
         })
