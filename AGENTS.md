@@ -14,9 +14,11 @@ A Rust library for writing babashka pods, plus pods built with it. Read
 
 Run `cj run check` before pushing; it must report `:ok? true`. It runs the CI
 gates (`cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
-`cargo test --workspace` with `REQUIRE_BB=1`, `cargo doc` with warnings as
-errors, `bb release-test`) and the writing rules below. Without cj, run those
-commands directly.
+`cargo build --workspace`, `cargo test --workspace` with `REQUIRE_BB=1`,
+`bb release-test`), `cargo doc` with warnings as errors, the tests for its own
+helpers in `.cj/test/`, and the commit subject, attribution and em dash rules
+below on tracked files and the branch's commits. Without cj, run the cargo and
+bb commands directly.
 
 ## Conventions
 
