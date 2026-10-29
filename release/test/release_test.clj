@@ -99,3 +99,48 @@
 
 (deftest reads-the-crate-version
   (is (re-matches #"\d+\.\d+\.\d+.*" (r/crate-version "sqlite"))))
+
+(deftest reads-cargo-toml-strings
+  (let [t (r/toml-strings (str "[package]\n"
+                               "name = \"pod-x\"   # the crate\n"
+                               "version=\"1.2.3\"\n"
+                               "edition = \"2024\"\n"
+                               "publish = false\n"
+                               "\n"
+                               "[package.metadata.pod-registry]\n"
+                               "name = \"me/pod-x\"\n"
+                               "description = \"Says \\\"x\\\"\"\n"
+                               "\n"
+                               "[dependencies]\n"
+                               "serde = { version = \"1\" }\n"
+                               "name = \"not-the-package\"\n"))]
+    (is (= {"name" "pod-x" "version" "1.2.3" "edition" "2024"} (get t "package")))
+    (is (= {"name" "me/pod-x" "description" "Says \"x\""}
+           (get t "package.metadata.pod-registry")))
+    (is (= "not-the-package" (get-in t ["dependencies" "name"])))))
+
+(deftest reads-pod-info-from-the-workspace
+  (doseq [pod ["sqlite" "fswatcher"]]
+    (let [info (r/pod-info pod)]
+      (is (= (str "pod-" pod) (:crate info)))
+      (is (= (str "joshrotenberg/pod-" pod) (:registry-name info)))
+      (is (string? (:description info)))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no pod nope" (r/pod-info "nope"))))
+
+(deftest parses-release-tags
+  (is (= {:pod "sqlite" :version "0.1.0"} (r/parse-tag "pod-sqlite-v0.1.0")))
+  (is (= {:pod "tree-sitter" :version "1.10.2-rc.1"} (r/parse-tag "pod-tree-sitter-v1.10.2-rc.1")))
+  (is (nil? (r/parse-tag "v0.1.0")) "library tags are not pod tags")
+  (is (nil? (r/parse-tag "pod-sqlite-0.1.0")))
+  (is (nil? (r/parse-tag "pod-sqlite-v1")))
+  (is (nil? (r/parse-tag nil))))
+
+(deftest checks-tags-against-cargo-toml
+  (let [v (r/crate-version "sqlite")]
+    (is (str/includes? (with-out-str (r/check-version {:tag (str "pod-sqlite-v" v)})) "matches"))
+    (is (= (str "pod=sqlite\ncrate=pod-sqlite\nversion=" v "\n")
+           (with-out-str (r/release-plan {:tag (str "pod-sqlite-v" v)}))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not match"
+                          (r/check-version {:tag "pod-sqlite-v999.0.0"})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is not pod-<name>-v<version>"
+                          (r/release-plan {:tag "v0.1.0"})))))

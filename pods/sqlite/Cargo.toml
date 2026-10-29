@@ -7,6 +7,11 @@ description = "A babashka pod for SQLite, built on babashka-pod and rusqlite"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# The pod-registry manifest written by `bb manifest` (see release/).
+[package.metadata.pod-registry]
+name = "joshrotenberg/pod-sqlite"
+description = "SQLite, built on rusqlite with SQLite compiled in"
+
 [dependencies]
 babashka-pod = { path = "../.." }
 rusqlite = { version = "0.40", features = ["bundled", "csvtab"] }
