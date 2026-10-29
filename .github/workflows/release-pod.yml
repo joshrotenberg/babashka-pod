@@ -24,6 +24,12 @@ env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
+# An explicit bash shell runs with -o pipefail, so `bb release-plan | tee`
+# fails the plan job when release-plan fails.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   plan:
     runs-on: ubuntu-latest
