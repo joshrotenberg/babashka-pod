@@ -532,6 +532,38 @@ fn transit_format_round_trips_through_the_runtime() {
 }
 
 #[test]
+fn null_args_decode_as_no_arguments() {
+    use crate::Format;
+    for format in [Format::Json, Format::TransitJson] {
+        let pod = Pod::new().format(format).namespace(
+            Namespace::new("pod.test.z")
+                .function("none", |_: NoArgs| Ok::<_, PodError>(1))
+                .function("sum", |nums: Vec<i64>| {
+                    Ok::<_, PodError>(nums.iter().sum::<i64>())
+                })
+                .stream("tick", |_: NoArgs, tx: Emitter| tx.send(&7)),
+        );
+        let (result, out) = run(
+            pod,
+            &[
+                invoke("1", "pod.test.z/none", "null"),
+                invoke("2", "pod.test.z/sum", "null"),
+                invoke("3", "pod.test.z/tick", "null"),
+            ],
+        );
+        result.unwrap();
+        for (id, value) in [("1", "1"), ("2", "0"), ("3", "7")] {
+            let r = replies(&out, id);
+            assert_eq!(r[0].get_str("value"), Some(value), "{format:?} id {id}");
+            assert!(
+                !status(r.last().unwrap()).contains(&"error"),
+                "{format:?} id {id}"
+            );
+        }
+    }
+}
+
+#[test]
 fn json_format_writes_transit_types_as_plain_json() {
     use crate::transit::{Inst, Keyword, Set};
     let pod = Pod::new().namespace(Namespace::new("pod.test.j").function("v", |_: NoArgs| {
