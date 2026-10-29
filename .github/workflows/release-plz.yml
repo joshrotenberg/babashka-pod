@@ -26,5 +26,7 @@ jobs:
       - name: Run release-plz
         uses: release-plz/action@v0.5
         env:
-          GITHUB_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+          # COMMITTER_TOKEN (a PAT) lets the release PR trigger CI; GITHUB_TOKEN
+          # works for everything else.
+          GITHUB_TOKEN: ${{ secrets.COMMITTER_TOKEN || secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
