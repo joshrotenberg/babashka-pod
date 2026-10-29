@@ -10,6 +10,11 @@ on:
       - main
   workflow_dispatch:
 
+# One release-plz run at a time; a running publish is never cancelled.
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
 jobs:
   release-plz:
     name: Release-plz
