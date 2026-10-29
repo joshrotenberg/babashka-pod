@@ -340,7 +340,7 @@ fn encode_marker(kind: &str, args: &[Json]) -> Json {
             "with-meta",
             Json::Array(args.iter().take(2).map(encode_value).collect()),
         ),
-        // A transit::Value, already written as transit.
+        // A transit::Value: [transit, plain JSON].
         "raw" => args.first().cloned().unwrap_or(Json::Null),
         _ => Json::Null,
     }
@@ -358,11 +358,8 @@ pub fn to_plain_json(v: &Json) -> Json {
                 let arg = |i: usize| args.get(i).map(to_plain_json).unwrap_or(Json::Null);
                 match kind {
                     "tagged" => serde_json::json!({ "tag": arg(0), "rep": arg(1) }),
-                    // A transit::Value: read its transit back as plain values.
-                    "raw" => args
-                        .first()
-                        .and_then(|t| Reader::new().value(t).ok())
-                        .unwrap_or(Json::Null),
+                    // A transit::Value: [transit, plain JSON].
+                    "raw" => args.get(1).cloned().unwrap_or(Json::Null),
                     _ => arg(0),
                 }
             }
@@ -396,7 +393,7 @@ fn as_marker(obj: &Map<String, Json>) -> Option<(&str, &[Json])> {
 }
 
 // ---------------------------------------------------------------------------
-// Json types
+// Marker types
 // ---------------------------------------------------------------------------
 
 /// Serializes `{MARKER: [kind, args...]}`. `items` is a tuple whose first
@@ -751,7 +748,7 @@ impl Value {
 
 impl Serialize for Value {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        serialize_marker(s, &("raw", write(self)))
+        serialize_marker(s, &("raw", write(self), plain(self)))
     }
 }
 
@@ -937,6 +934,8 @@ fn tree_scalar(raw: &str) -> Result<Value, DecodeError> {
         }
         'n' => Value::BigInt(body.to_string()),
         'f' => Value::BigDec(body.to_string()),
+        // A verbose-mode timestamp, kept as its text as decode does.
+        't' => Value::String(body.to_string()),
         'b' => Value::Bytes(base64_decode(body).ok_or_else(bad)?),
         'm' => Value::Inst(body.parse::<i64>().map_err(|_| bad())?),
         'i' => match body.parse::<i64>() {
@@ -958,6 +957,58 @@ fn tree_scalar(raw: &str) -> Result<Value, DecodeError> {
         },
         _ => Value::String(raw.to_string()),
     })
+}
+
+/// A [`Value`] as plain JSON, the way [`decode`] reads the same transit and
+/// [`to_plain_json`] writes the marker types: keywords and symbols become
+/// their names, big numbers and special floats strings, ratios floats, bytes
+/// base64, collections arrays, tagged values `{"tag": .., "rep": ..}`, and
+/// metadata is dropped.
+fn plain(v: &Value) -> Json {
+    let text = |s: &str| Json::String(s.to_string());
+    let all = |items: &[Value]| Json::Array(items.iter().map(plain).collect());
+    match v {
+        Value::Nil => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Int(i) => Json::from(*i),
+        Value::Float(f) if f.is_nan() => text("NaN"),
+        Value::Float(f) if f.is_infinite() => text(if *f > 0.0 { "INF" } else { "-INF" }),
+        Value::Float(f) => Number::from_f64(*f).map(Json::Number).unwrap_or(Json::Null),
+        Value::Ratio {
+            numerator,
+            denominator,
+        } => match (numerator.parse::<f64>(), denominator.parse::<f64>()) {
+            (Ok(n), Ok(d)) => Number::from_f64(n / d)
+                .map(Json::Number)
+                .unwrap_or(Json::Null),
+            _ => Json::Null,
+        },
+        Value::BigInt(s)
+        | Value::BigDec(s)
+        | Value::String(s)
+        | Value::Keyword(s)
+        | Value::Symbol(s)
+        | Value::Uuid(s)
+        | Value::Uri(s) => text(s),
+        Value::Char(c) => Json::String(c.to_string()),
+        Value::Inst(ms) => Json::from(*ms),
+        Value::Bytes(b) => Json::String(base64_encode(b)),
+        Value::List(items) | Value::Vector(items) | Value::Set(items) => all(items),
+        Value::Map(entries) => Json::Object(
+            entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = match plain(k) {
+                        Json::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (key, plain(v))
+                })
+                .collect(),
+        ),
+        Value::Tagged(tag, rep) => serde_json::json!({ "tag": tag, "rep": plain(rep) }),
+        Value::WithMeta(value, _) => plain(value),
+    }
 }
 
 /// Writes a [`Value`] as transit, in the JSON form [`encode`] produces.
@@ -1373,6 +1424,24 @@ mod tests {
         .unwrap();
         assert_eq!(encode(&v), r#"["^ ","~:k","~:a","~:s",["~#set",["~cx"]]]"#);
         assert_eq!(to_plain_json(&v), json!({"k": "a", "s": ["x"]}));
+        let v = serde_json::to_value(Value::Vector(vec![
+            Value::Bytes(vec![0, 255, 16]),
+            Value::Tagged("point".into(), Box::new(Value::Int(1))),
+            Value::WithMeta(Box::new(Value::Int(3)), Box::new(Value::Map(vec![]))),
+            Value::Ratio {
+                numerator: "1".into(),
+                denominator: "4".into(),
+            },
+            Value::Float(f64::NAN),
+            Value::Map(vec![(Value::Int(1), Value::Keyword("one".into()))]),
+            // Not valid as transit a reader would accept, but still written.
+            Value::Tagged("set".into(), Box::new(Value::Int(1))),
+        ]))
+        .unwrap();
+        assert_eq!(
+            to_plain_json(&v),
+            json!(["AP8Q", {"tag": "point", "rep": 1}, 3, 0.25, "NaN", {"1": "one"}, {"tag": "set", "rep": 1}])
+        );
         assert_eq!(
             Value::from(&json!({"a": [1, "x", null, 1.5]})),
             Value::Map(vec![(

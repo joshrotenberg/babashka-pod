@@ -609,6 +609,37 @@ fn transit_handlers_get_typed_arguments() {
         );
     }
 
+    // stream_fn_transit registers the raw var each*; arg_meta keeps metadata.
+    let ns2 = Namespace::new("pod.test.tv2")
+        .stream_fn_transit("each", |args: Vec<V>, tx: Emitter| {
+            for a in &args {
+                tx.send(a)?;
+            }
+            Ok(())
+        })
+        .function_transit("meta", |args: Vec<V>| match args.first() {
+            Some(V::WithMeta(_, meta)) => Ok::<_, PodError>((**meta).clone()),
+            _ => Ok(V::Nil),
+        })
+        .arg_meta("meta");
+    let (result, out) = run(
+        Pod::new().format(Format::TransitJson).namespace(ns2),
+        &[
+            invoke("1", "pod.test.tv2/each*", r#"["~$s"]"#),
+            invoke(
+                "2",
+                "pod.test.tv2/meta",
+                r#"[["~#with-meta",[[1],["^ ","~:k",1]]]]"#,
+            ),
+        ],
+    );
+    result.unwrap();
+    assert_eq!(replies(&out, "1")[0].get_str("value"), Some(r#""~$s""#));
+    assert_eq!(
+        replies(&out, "2")[0].get_str("value"),
+        Some(r#"["^ ","~:k",1]"#)
+    );
+
     // Under JSON the arguments carry no Clojure types.
     let (result, out) = run(
         Pod::new().namespace(ns()),
