@@ -234,6 +234,7 @@ to crates.io; its package does not include `pods/`. Each pod is a workspace memb
 |---|---|---|
 | File watching, on notify; a drop-in for `org.babashka/fswatcher` | `pod.babashka.fswatcher` | [`pods/fswatcher`](pods/fswatcher/README.md) |
 | SQLite, on rusqlite with bundled SQLite | `pod.joshrotenberg.sqlite` | [`pods/sqlite`](pods/sqlite/README.md) |
+| Parsing source code with tree-sitter: syntax trees, queries, outlines of definitions | `pod.joshrotenberg.treesitter` | [`pods/treesitter`](pods/treesitter/README.md) |
 
 ### Layout
 
