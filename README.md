@@ -228,6 +228,7 @@ or if readable payloads became necessary and a debug log of decoded traffic woul
 
 | Pod | Path |
 |---|---|
+| File watching, on notify; a drop-in for `org.babashka/fswatcher` | [`pods/fswatcher`](pods/fswatcher/README.md) |
 | SQLite, on rusqlite with bundled SQLite | [`pods/sqlite`](pods/sqlite/README.md) |
 
 They are workspace members with `publish = false`; `cargo test --workspace` runs their bb tests.
