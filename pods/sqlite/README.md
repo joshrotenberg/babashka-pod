@@ -72,6 +72,23 @@ Errors from SQLite are raised as `ex-info` with the SQL in `ex-data`:
 ;; => ["no such table: nope" {:sql "select * from nope"}]
 ```
 
+## As a library
+
+The crate is also a library, `pod_sqlite`, so another pod binary can serve this namespace next to
+others. `pod_sqlite::namespace()` builds it with its own state; serve it with `Format::TransitJson`:
+
+```rust
+babashka_pod::Pod::new()
+    .format(babashka_pod::Format::TransitJson)
+    .namespace(pod_sqlite::namespace())
+    .run()
+```
+
+## Releases
+
+Released from this repository with the tag `pod-sqlite-v<version>`; see
+[Pods in this repository](../../README.md#pods-in-this-repository).
+
 ## Compared with go-sqlite3
 
 [go-sqlite3](https://github.com/babashka/pod-babashka-go-sqlite3) is the SQLite pod in the pod

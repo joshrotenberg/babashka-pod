@@ -45,6 +45,23 @@ Events are maps with `:type` and `:path`. `:path` starts with `path` as given to
 | `:chmod` | Metadata changed. On macOS `touch` reports this, as do Spotlight and editors updating attributes |
 | `:error` | The OS watcher reported an error; the map also has `:error` with the message |
 
+## As a library
+
+The crate is also a library, `pod_fswatcher`, so another pod binary can serve this namespace next to
+others. `pod_fswatcher::namespace()` builds it with its own state; serve it with `Format::TransitJson`:
+
+```rust
+babashka_pod::Pod::new()
+    .format(babashka_pod::Format::TransitJson)
+    .namespace(pod_fswatcher::namespace())
+    .run()
+```
+
+## Releases
+
+Released from this repository with the tag `pod-fswatcher-v<version>`; see
+[Pods in this repository](../../README.md#pods-in-this-repository).
+
 ## Differences from the Go pod
 
 - `watch` on a path that does not exist throws `ex-info`. The Go pod returns a watcher that never

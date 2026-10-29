@@ -214,25 +214,86 @@ metadata and trailing input after the first value wrongly without an error.
 We would revisit it for a pod client other than `babashka.pods` that speaks EDN but not transit,
 or if readable payloads became necessary and a debug log of decoded traffic would not do.
 
-## Pods built with this crate
+## Pods in this repository
 
-| Pod | Path |
+This repository holds the library and the pods built on it. The library is the crate published
+to crates.io; its package does not include `pods/`. Each pod is a workspace member under
+`pods/<name>` with its own version, tag and release.
+
+| Pod | Namespace | Path |
+|---|---|---|
+| File watching, on notify; a drop-in for `org.babashka/fswatcher` | `pod.babashka.fswatcher` | [`pods/fswatcher`](pods/fswatcher/README.md) |
+| SQLite, on rusqlite with bundled SQLite | `pod.joshrotenberg.sqlite` | [`pods/sqlite`](pods/sqlite/README.md) |
+
+### Layout
+
+| | Rule |
 |---|---|
-| File watching, on notify; a drop-in for `org.babashka/fswatcher` | [`pods/fswatcher`](pods/fswatcher/README.md) |
-| SQLite, on rusqlite with bundled SQLite | [`pods/sqlite`](pods/sqlite/README.md) |
+| Directory | `pods/<name>`. The workspace includes `pods/*`, so a new pod needs no change to the root `Cargo.toml` |
+| Crate | `pod-<name>`, with `publish = false` and the library as a path dependency |
+| Library | `pod_<name>`: `NAMESPACE`, the namespace name, and `namespace()`, which builds the `Namespace` with fresh state |
+| Binary | `pod-<name>`: `src/main.rs` serves `namespace()` with `Format::TransitJson` and does nothing else |
+| Format | `Format::TransitJson` for every pod, so any set of them can be served by one `Pod` |
+| Tests | `test.bb` loads the binary named by `<NAME>_POD` (for example `SQLITE_POD`) and prints one line per check; `tests/bb.rs` runs it over stdio and socket and asserts on the lines |
+| Registry entry | `[package.metadata.pod-registry]` in the pod's `Cargo.toml`: `name` (`:pod/name`) and `description` (`:pod/description`) |
 
-They are workspace members with `publish = false`; `cargo test --workspace` runs their bb tests.
+Because each pod is a library, a pod binary can serve several of them:
 
-## Releasing a pod
+```rust
+use babashka_pod::{Format, Pod};
+
+fn main() -> Result<(), babashka_pod::Error> {
+    Pod::new()
+        .format(Format::TransitJson)
+        .namespace(pod_sqlite::namespace())
+        .namespace(pod_fswatcher::namespace())
+        .run()
+}
+```
+
+### Versions, tags and releases
+
+- A pod's version is the `version` in `pods/<name>/Cargo.toml`. It changes only with that pod and
+  is independent of the library's version and of other pods.
+- A pod is released by pushing the tag `pod-<name>-v<version>`, such as `pod-sqlite-v0.2.0`. Tags
+  for the library do not start with `pod-`.
+- `.github/workflows/release-pod.yml` runs on `pod-*-v*` tags. `bb release-plan <tag>` checks that
+  the tag names an existing pod and matches its `Cargo.toml` version, and gives the build the pod's
+  name. The workflow builds that pod for macOS `aarch64` and `x86_64`, Linux `x86_64` and
+  `aarch64`, and Windows `x86_64`, runs its `test.bb` where the runner can execute the binary,
+  packages each build, generates `manifest.edn`, and creates a GitHub release with all of it.
+  Nothing else in the workspace is built or released.
+
+To release a pod: bump `version` in `pods/<name>/Cargo.toml`, merge, then tag the merge commit
+and push the tag:
+
+```bash
+git tag pod-sqlite-v0.2.0 && git push origin pod-sqlite-v0.2.0
+```
+
+Registry manifests point at public URLs, so submitting a manifest to the pod registry needs the
+release assets to be public.
+
+### Adding a pod
+
+1. Create `pods/<name>` with a `Cargo.toml` for `pod-<name>` (`publish = false`, `babashka-pod = {
+   path = "../.." }`, and a `[package.metadata.pod-registry]` table), a `src/lib.rs` with
+   `NAMESPACE` and `namespace()`, and a `src/main.rs` like `pods/sqlite/src/main.rs`.
+2. Add `test.bb` and `tests/bb.rs` following `pods/sqlite`.
+3. Add a `README.md` with the client API, and a row to the table above.
+4. Check: `cargo test -p pod-<name>` and `bb release-plan pod-<name>-v<version>`.
+
+### Release tooling
 
 `bb.edn` at the repository root has the release tasks (code in `release/`); each takes `--help`.
 
 | Task | Does |
 |---|---|
+| `bb release-plan <tag>` | Checks a `pod-<name>-v<version>` tag against `pods/<name>/Cargo.toml` and prints `pod=`, `crate=` and `version=` lines (the workflow appends them to `$GITHUB_OUTPUT`) |
+| `bb check-version <tag>` | The same check, printing a message |
 | `bb arch <file>` | Reads a binary's Mach-O, ELF, or PE header and prints the OS and CPU it was built for |
-| `bb package --target <triple>` | Zips `target/<triple>/release/pod-sqlite[.exe]` as `dist/pod-sqlite-<version>-<os>-<arch>.zip` with a `.sha256`, after checking the header matches the target |
-| `bb manifest --base-url <url>` | Writes `dist/manifest.edn` in the pod-registry format from the zips in `dist/`, opening each one and checking the binary's header against its `:os/name` and `:os/arch`; refuses on a mismatch |
-| `bb check-version <tag>` | Fails unless the tag is `pod-sqlite-v<version from pods/sqlite/Cargo.toml>` |
+| `bb package --pod <name> --target <triple>` | Zips `target/<triple>/release/pod-<name>[.exe]` as `dist/pod-<name>-<version>-<os>-<arch>.zip` with a `.sha256`, after checking the header matches the target |
+| `bb manifest --pod <name> --base-url <url>` | Writes `dist/manifest.edn` in the pod-registry format from that pod's zips in `dist/`, opening each one and checking the binary's header against its `:os/name` and `:os/arch`; refuses on a mismatch |
 | `bb release-test` | Tests for the above (CI runs it) |
 
 The registry matches `:os/arch` against babashka's `os.arch`: `aarch64` or `x86_64` on macOS,
@@ -240,12 +301,6 @@ The registry matches `:os/arch` against babashka's `os.arch`: `aarch64` or `x86_
 is how a manifest can list an x86_64 binary as `aarch64` (fswatcher 0.0.5) or leave out a build
 the release has (go-sqlite3 0.3.13 has no macOS `aarch64` entry). `bb manifest` builds the
 manifest from the binaries, so neither can happen.
-
-`.github/workflows/release-pod-sqlite.yml` runs on a `pod-sqlite-v*` tag: it builds macOS
-`aarch64` and `x86_64`, Linux `x86_64` and `aarch64`, and Windows `x86_64`, runs `test.bb` where the
-runner can execute the binary, packages each build, generates the manifest, and creates a GitHub
-release with all of it. Registry manifests point at public URLs, so submitting to the pod registry
-needs the release assets to be public.
 
 ## License
 
