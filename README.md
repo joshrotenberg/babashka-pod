@@ -15,6 +15,8 @@ cargo add babashka-pod
 
 API documentation is on [docs.rs](https://docs.rs/babashka-pod).
 
+## Usage
+
 ```rust
 use babashka_pod::{Emitter, Namespace, Pod, PodError};
 
