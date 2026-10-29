@@ -4,7 +4,7 @@
 
 use babashka_pod::serde_json::{Value, json};
 use babashka_pod::transit::{Inst, Keyword, Set, Tagged, WithMeta};
-use babashka_pod::{Emitter, Format, Namespace, Pod, PodError};
+use babashka_pod::{Emitter, Format, Namespace, NoArgs, Pod, PodError};
 
 const NS: &str = "pod.joshrotenberg.transit";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -60,6 +60,9 @@ fn main() {
         .arg_meta("meta-of")
         .doc("meta-of", "Returns the metadata of its argument, or nil.")
         .arglists("meta-of", ["[x]"])
+        .function("ping", |_: NoArgs| Ok::<_, PodError>(Keyword::new("pong")))
+        .doc("ping", "Returns :pong. Takes no arguments.")
+        .arglists("ping", ["[]"])
         .function("fail", |(kind,): (Keyword,)| {
             Err::<Value, _>(PodError::new("failed on purpose").with_data(json!({ "kind": kind })))
         })
