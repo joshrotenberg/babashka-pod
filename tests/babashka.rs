@@ -58,6 +58,8 @@ fn run_transit(args: &[&str]) -> Option<String> {
 fn check(stdout: &str) {
     for expected in [
         "add: 6.5",
+        "add no args: 0.0",
+        "ping: pong",
         "greet: {:greeting hello, babashka, :length 8}",
         "doc: Adds any number of numbers.",
         "divide: 3",
@@ -100,6 +102,7 @@ fn check_transit(stdout: &str) {
         "kw-info: {:kw :my.ns/thing, :name \"thing\", :ns \"my.ns\"}",
         "plus-days: #inst \"2026-10-15T00:00:00.000-00:00\" java.util.Date",
         "point: {:x 3, :y 4}",
+        "ping: :pong clojure.lang.Keyword",
         "meta-of: {:source \"repl\"}",
         "meta-of plain: nil",
         "fail: failed on purpose {:kind :boom}",
