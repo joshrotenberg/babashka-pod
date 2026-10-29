@@ -564,6 +564,64 @@ fn null_args_decode_as_no_arguments() {
 }
 
 #[test]
+fn transit_handlers_get_typed_arguments() {
+    use crate::Format;
+    use crate::transit::Value as V;
+    let ns = || {
+        Namespace::new("pod.test.tv")
+            .function_transit("echo", |args: Vec<V>| Ok::<_, PodError>(V::Vector(args)))
+            .function_transit("count", |args: Vec<V>| Ok::<_, PodError>(args.len()))
+            .stream_transit("each", |args: Vec<V>, tx: Emitter| {
+                for a in &args {
+                    tx.send(a)?;
+                }
+                Ok(())
+            })
+    };
+    // (echo :a "a" '(1) 1/3), as babashka writes it.
+    let args = r#"["~:a","a",["~#list",[1]],["~#ratio",["~n1","~n3"]]]"#;
+    let (result, out) = run(
+        Pod::new().format(Format::TransitJson).namespace(ns()),
+        &[
+            invoke("1", "pod.test.tv/echo", args),
+            invoke("2", "pod.test.tv/count", "null"),
+            invoke("3", "pod.test.tv/each", r#"["~:x","~cy"]"#),
+            invoke("4", "pod.test.tv/echo", r#"["~:a""#),
+            invoke("5", "pod.test.tv/echo", r#""not a vector""#),
+        ],
+    );
+    result.unwrap();
+    assert_eq!(replies(&out, "1")[0].get_str("value"), Some(args));
+    assert_eq!(replies(&out, "2")[0].get_str("value"), Some("0"));
+    let each: Vec<_> = replies(&out, "3")
+        .iter()
+        .filter_map(|m| m.get_str("value"))
+        .collect();
+    assert_eq!(each, [r#""~:x""#, r#""~cy""#]);
+    for id in ["4", "5"] {
+        let r = replies(&out, id)[0];
+        assert_eq!(status(r), ["done", "error"]);
+        assert!(
+            r.get_str("ex-message")
+                .unwrap()
+                .starts_with("invalid arguments for pod.test.tv/echo"),
+            "{r:?}"
+        );
+    }
+
+    // Under JSON the arguments carry no Clojure types.
+    let (result, out) = run(
+        Pod::new().namespace(ns()),
+        &[invoke("1", "pod.test.tv/echo", r#"["a",{"k":1}]"#)],
+    );
+    result.unwrap();
+    assert_eq!(
+        replies(&out, "1")[0].get_str("value"),
+        Some(r#"["a",{"k":1}]"#)
+    );
+}
+
+#[test]
 fn json_format_writes_transit_types_as_plain_json() {
     use crate::transit::{Inst, Keyword, Set};
     let pod = Pod::new().namespace(Namespace::new("pod.test.j").function("v", |_: NoArgs| {

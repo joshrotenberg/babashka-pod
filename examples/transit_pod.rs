@@ -3,7 +3,7 @@
 //! from the repository root.
 
 use babashka_pod::serde_json::{Value, json};
-use babashka_pod::transit::{Inst, Keyword, Set, Tagged, WithMeta};
+use babashka_pod::transit::{self, Inst, Keyword, Set, Tagged, WithMeta};
 use babashka_pod::{Emitter, Format, Namespace, NoArgs, Pod, PodError};
 
 const NS: &str = "pod.joshrotenberg.transit";
@@ -63,6 +63,16 @@ fn main() {
         .function("ping", |_: NoArgs| Ok::<_, PodError>(Keyword::new("pong")))
         .doc("ping", "Returns :pong. Takes no arguments.")
         .arglists("ping", ["[]"])
+        // Arguments as transit::Value keep their Clojure types, so the value
+        // goes back exactly as it came.
+        .function_transit("echo", |args: Vec<transit::Value>| {
+            Ok::<_, PodError>(args.into_iter().next().unwrap_or(transit::Value::Nil))
+        })
+        .doc(
+            "echo",
+            "Returns its argument unchanged, with its Clojure type.",
+        )
+        .arglists("echo", ["[x]"])
         .function("fail", |(kind,): (Keyword,)| {
             Err::<Value, _>(PodError::new("failed on purpose").with_data(json!({ "kind": kind })))
         })

@@ -103,6 +103,7 @@ fn check_transit(stdout: &str) {
         "plus-days: #inst \"2026-10-15T00:00:00.000-00:00\" java.util.Date",
         "point: {:x 3, :y 4}",
         "ping: :pong clojure.lang.Keyword",
+        "echo keeps types: true",
         "meta-of: {:source \"repl\"}",
         "meta-of plain: nil",
         "fail: failed on purpose {:kind :boom}",

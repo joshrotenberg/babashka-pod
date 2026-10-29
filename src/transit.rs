@@ -55,11 +55,7 @@ impl std::error::Error for DecodeError {}
 /// Decodes transit+json text into a `serde_json::Value`.
 pub fn decode(text: &str) -> Result<Json, DecodeError> {
     let json: Json = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
-    let mut reader = Reader {
-        cache: Vec::new(),
-        next: 0,
-    };
-    reader.value(&json)
+    Reader::new().value(&json)
 }
 
 struct Reader {
@@ -68,6 +64,13 @@ struct Reader {
 }
 
 impl Reader {
+    fn new() -> Self {
+        Reader {
+            cache: Vec::new(),
+            next: 0,
+        }
+    }
+
     /// Resolves a cache reference, or records a cacheable string, and returns
     /// the encoded string itself.
     fn resolve(&mut self, s: &str, as_key: bool) -> Result<String, DecodeError> {
@@ -337,6 +340,8 @@ fn encode_marker(kind: &str, args: &[Json]) -> Json {
             "with-meta",
             Json::Array(args.iter().take(2).map(encode_value).collect()),
         ),
+        // A transit::Value, already written as transit.
+        "raw" => args.first().cloned().unwrap_or(Json::Null),
         _ => Json::Null,
     }
 }
@@ -353,6 +358,11 @@ pub fn to_plain_json(v: &Json) -> Json {
                 let arg = |i: usize| args.get(i).map(to_plain_json).unwrap_or(Json::Null);
                 match kind {
                     "tagged" => serde_json::json!({ "tag": arg(0), "rep": arg(1) }),
+                    // A transit::Value: read its transit back as plain values.
+                    "raw" => args
+                        .first()
+                        .and_then(|t| Reader::new().value(t).ok())
+                        .unwrap_or(Json::Null),
                     _ => arg(0),
                 }
             }
@@ -658,6 +668,357 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for WithMeta<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Lossless values
+// ---------------------------------------------------------------------------
+
+/// A Clojure value as transit carries it, with nothing collapsed.
+///
+/// [`decode`] maps transit onto `serde_json::Value`, so keywords arrive as
+/// strings, lists and sets as arrays, and ratios as floats. `Value` keeps each
+/// type distinct: a keyword is not a string, a list is not a vector, `1/3` is
+/// a ratio, and a map's keys can be anything, so `{:a 1 "a" 2}` keeps both
+/// entries. Handlers registered with
+/// [`Namespace::function_transit`](crate::Namespace::function_transit) and
+/// the other `*_transit` methods get their arguments as `Value`s.
+///
+/// `Value` implements [`Serialize`]: returned from a handler, or inside a
+/// returned value, it is written back as the same transit value. Under the
+/// JSON format it is written as plain JSON, as [`decode`] would read it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Value {
+    /// `nil`.
+    Nil,
+    /// `true` or `false`.
+    Bool(bool),
+    /// A long.
+    Int(i64),
+    /// A `BigInt` (`1N`), as a decimal string.
+    BigInt(String),
+    /// A double. NaN and the infinities are kept.
+    Float(f64),
+    /// A `BigDecimal` (`1.5M`), as a decimal string.
+    BigDec(String),
+    /// A ratio (`1/3`), with numerator and denominator as decimal strings.
+    Ratio {
+        /// The numerator.
+        numerator: String,
+        /// The denominator.
+        denominator: String,
+    },
+    /// A string.
+    String(String),
+    /// A character (`\x`).
+    Char(char),
+    /// A keyword, without the colon: `Keyword("ns/a".into())` is `:ns/a`.
+    Keyword(String),
+    /// A symbol.
+    Symbol(String),
+    /// An `#inst`, as milliseconds since the Unix epoch.
+    Inst(i64),
+    /// A `#uuid`, in its canonical string form.
+    Uuid(String),
+    /// A `java.net.URI`.
+    Uri(String),
+    /// A byte array.
+    Bytes(Vec<u8>),
+    /// A list.
+    List(Vec<Value>),
+    /// A vector.
+    Vector(Vec<Value>),
+    /// A set, with elements in the order they were read.
+    Set(Vec<Value>),
+    /// A map, as key-value pairs in the order they were read.
+    Map(Vec<(Value, Value)>),
+    /// A tagged value with a tag this module does not know: tag (without
+    /// `~#`) and representation.
+    Tagged(String, Box<Value>),
+    /// A value and its metadata map.
+    WithMeta(Box<Value>, Box<Value>),
+}
+
+impl Value {
+    /// The value for `key` in a map, or `None` for a missing key or a value
+    /// that is not a map.
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        match self {
+            Value::Map(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_marker(s, &("raw", write(self)))
+    }
+}
+
+/// Builds a `Value` from plain JSON, which carries no Clojure types: objects
+/// become maps with string keys and arrays become vectors.
+impl From<&Json> for Value {
+    fn from(v: &Json) -> Self {
+        match v {
+            Json::Null => Value::Nil,
+            Json::Bool(b) => Value::Bool(*b),
+            Json::Number(n) => number(n),
+            Json::String(s) => Value::String(s.clone()),
+            Json::Array(items) => Value::Vector(items.iter().map(Value::from).collect()),
+            Json::Object(obj) => Value::Map(
+                obj.iter()
+                    .map(|(k, v)| (Value::String(k.clone()), Value::from(v)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn number(n: &Number) -> Value {
+    match (n.as_i64(), n.as_u64(), n.as_f64()) {
+        (Some(i), _, _) => Value::Int(i),
+        (None, Some(u), _) => Value::BigInt(u.to_string()),
+        (_, _, Some(f)) => Value::Float(f),
+        _ => Value::BigDec(n.to_string()),
+    }
+}
+
+/// Decodes transit+json text into a [`Value`], keeping every type transit
+/// carries.
+pub fn read(text: &str) -> Result<Value, DecodeError> {
+    let json: Json = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
+    Reader::new().tree(&json)
+}
+
+impl Reader {
+    fn tree(&mut self, v: &Json) -> Result<Value, DecodeError> {
+        match v {
+            Json::Null => Ok(Value::Nil),
+            Json::Bool(b) => Ok(Value::Bool(*b)),
+            Json::Number(n) => Ok(number(n)),
+            Json::String(s) => {
+                let raw = self.resolve(s, false)?;
+                tree_scalar(&raw)
+            }
+            Json::Array(items) => self.tree_array(items),
+            Json::Object(obj) => self.tree_verbose_map(obj),
+        }
+    }
+
+    fn tree_items(&mut self, items: &[Json]) -> Result<Vec<Value>, DecodeError> {
+        items.iter().map(|v| self.tree(v)).collect()
+    }
+
+    fn tree_array(&mut self, items: &[Json]) -> Result<Value, DecodeError> {
+        let Some(Json::String(first)) = items.first() else {
+            return self.tree_items(items).map(Value::Vector);
+        };
+        let head = self.resolve(first, false)?;
+        if head == "^ " {
+            let rest = &items[1..];
+            if rest.len() % 2 != 0 {
+                return Err(DecodeError("map with an odd number of entries".into()));
+            }
+            let mut entries = Vec::with_capacity(rest.len() / 2);
+            for pair in rest.chunks(2) {
+                let key = self.tree_key(&pair[0])?;
+                entries.push((key, self.tree(&pair[1])?));
+            }
+            return Ok(Value::Map(entries));
+        }
+        if let Some(tag) = head.strip_prefix("~#") {
+            if items.len() != 2 {
+                return Err(DecodeError(format!("tag {tag} without exactly one value")));
+            }
+            return self.tree_tagged(tag, &items[1]);
+        }
+        let mut out = vec![tree_scalar(&head)?];
+        for v in &items[1..] {
+            out.push(self.tree(v)?);
+        }
+        Ok(Value::Vector(out))
+    }
+
+    fn tree_verbose_map(&mut self, obj: &Map<String, Json>) -> Result<Value, DecodeError> {
+        if obj.len() == 1 {
+            let (k, v) = obj.iter().next().unwrap();
+            if let Some(tag) = k.strip_prefix("~#") {
+                return self.tree_tagged(tag, v);
+            }
+        }
+        let mut entries = Vec::with_capacity(obj.len());
+        for (k, v) in obj {
+            let key = self.tree_key(&Json::String(k.clone()))?;
+            entries.push((key, self.tree(v)?));
+        }
+        Ok(Value::Map(entries))
+    }
+
+    fn tree_key(&mut self, k: &Json) -> Result<Value, DecodeError> {
+        match k {
+            Json::String(s) => {
+                let raw = self.resolve(s, true)?;
+                tree_scalar(&raw)
+            }
+            other => self.tree(other),
+        }
+    }
+
+    fn tree_tagged(&mut self, tag: &str, rep: &Json) -> Result<Value, DecodeError> {
+        let items = |v: Value| match v {
+            Value::Vector(items) => Ok(items),
+            other => Err(DecodeError(format!("{tag} of a non-array: {other:?}"))),
+        };
+        match tag {
+            "set" => Ok(Value::Set(items(self.tree(rep)?)?)),
+            "list" => Ok(Value::List(items(self.tree(rep)?)?)),
+            "cmap" => {
+                let flat = items(self.tree(rep)?)?;
+                if flat.len() % 2 != 0 {
+                    return Err(DecodeError("cmap with an odd number of entries".into()));
+                }
+                let mut entries = Vec::with_capacity(flat.len() / 2);
+                let mut it = flat.into_iter();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    entries.push((k, v));
+                }
+                Ok(Value::Map(entries))
+            }
+            "with-meta" => match <[Value; 2]>::try_from(items(self.tree(rep)?)?) {
+                Ok([value, meta]) => Ok(Value::WithMeta(Box::new(value), Box::new(meta))),
+                Err(_) => Err(DecodeError("with-meta needs [value meta]".into())),
+            },
+            "ratio" => {
+                let integer = |v: &Value| match v {
+                    Value::Int(i) => Some(i.to_string()),
+                    Value::BigInt(s) => Some(s.clone()),
+                    _ => None,
+                };
+                match items(self.tree(rep)?)?.as_slice() {
+                    [n, d] => match (integer(n), integer(d)) {
+                        (Some(numerator), Some(denominator)) => Ok(Value::Ratio {
+                            numerator,
+                            denominator,
+                        }),
+                        _ => Err(DecodeError("ratio of non-integers".into())),
+                    },
+                    _ => Err(DecodeError("ratio needs [numerator denominator]".into())),
+                }
+            }
+            "'" => self.tree(rep),
+            other => Ok(Value::Tagged(other.to_string(), Box::new(self.tree(rep)?))),
+        }
+    }
+}
+
+/// Decodes a non-cache transit string into a [`Value`].
+fn tree_scalar(raw: &str) -> Result<Value, DecodeError> {
+    let mut chars = raw.chars();
+    if chars.next() != Some('~') {
+        return Ok(Value::String(raw.to_string()));
+    }
+    let Some(kind) = chars.next() else {
+        return Ok(Value::String(raw.to_string()));
+    };
+    let body = &raw[2..];
+    let bad = || DecodeError(format!("bad transit scalar {raw:?}"));
+    Ok(match kind {
+        '~' | '^' | '`' => Value::String(raw[1..].to_string()),
+        ':' => Value::Keyword(body.to_string()),
+        '$' => Value::Symbol(body.to_string()),
+        'u' => Value::Uuid(body.to_string()),
+        'r' => Value::Uri(body.to_string()),
+        'c' => {
+            let mut cs = body.chars();
+            match (cs.next(), cs.next()) {
+                (Some(c), None) => Value::Char(c),
+                _ => return Err(bad()),
+            }
+        }
+        'n' => Value::BigInt(body.to_string()),
+        'f' => Value::BigDec(body.to_string()),
+        'b' => Value::Bytes(base64_decode(body).ok_or_else(bad)?),
+        'm' => Value::Inst(body.parse::<i64>().map_err(|_| bad())?),
+        'i' => match body.parse::<i64>() {
+            Ok(n) => Value::Int(n),
+            Err(_) => Value::BigInt(body.to_string()),
+        },
+        'd' => Value::Float(body.parse::<f64>().map_err(|_| bad())?),
+        '?' => match body {
+            "t" => Value::Bool(true),
+            "f" => Value::Bool(false),
+            _ => return Err(bad()),
+        },
+        '_' => Value::Nil,
+        'z' => match body {
+            "NaN" => Value::Float(f64::NAN),
+            "INF" => Value::Float(f64::INFINITY),
+            "-INF" => Value::Float(f64::NEG_INFINITY),
+            _ => return Err(bad()),
+        },
+        _ => Value::String(raw.to_string()),
+    })
+}
+
+/// Writes a [`Value`] as transit, in the JSON form [`encode`] produces.
+fn write(v: &Value) -> Json {
+    let text = |s: String| Json::String(s);
+    let tagged = |tag: &str, rep: Json| Json::Array(vec![text(format!("~#{tag}")), rep]);
+    let all = |items: &[Value]| Json::Array(items.iter().map(write).collect());
+    match v {
+        Value::Nil => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Int(i) if i.unsigned_abs() > MAX_JSON_INT => text(format!("~i{i}")),
+        Value::Int(i) => Json::from(*i),
+        Value::BigInt(n) => text(format!("~n{n}")),
+        Value::Float(f) if f.is_nan() => text("~zNaN".into()),
+        Value::Float(f) if f.is_infinite() => {
+            text(if *f > 0.0 { "~zINF" } else { "~z-INF" }.into())
+        }
+        Value::Float(f) => Number::from_f64(*f).map(Json::Number).unwrap_or(Json::Null),
+        Value::BigDec(d) => text(format!("~f{d}")),
+        Value::Ratio {
+            numerator,
+            denominator,
+        } => tagged(
+            "ratio",
+            Json::Array(vec![
+                text(format!("~n{numerator}")),
+                text(format!("~n{denominator}")),
+            ]),
+        ),
+        Value::String(s) => text(escape(s)),
+        Value::Char(c) => text(format!("~c{c}")),
+        Value::Keyword(k) => text(format!("~:{k}")),
+        Value::Symbol(s) => text(format!("~${s}")),
+        Value::Inst(ms) => text(format!("~m{ms}")),
+        Value::Uuid(u) => text(format!("~u{u}")),
+        Value::Uri(u) => text(format!("~r{u}")),
+        Value::Bytes(b) => text(format!("~b{}", base64_encode(b))),
+        Value::List(items) => tagged("list", all(items)),
+        Value::Vector(items) => all(items),
+        Value::Set(items) => tagged("set", all(items)),
+        Value::Map(entries) => {
+            let flat: Vec<Json> = entries
+                .iter()
+                .flat_map(|(k, v)| [write(k), write(v)])
+                .collect();
+            // Keys written as strings fit a "^ " map; others need a cmap.
+            if flat.iter().step_by(2).all(Json::is_string) {
+                let mut out = vec![Json::from("^ ")];
+                out.extend(flat);
+                Json::Array(out)
+            } else {
+                tagged("cmap", Json::Array(flat))
+            }
+        }
+        Value::Tagged(tag, rep) => tagged(tag, write(rep)),
+        Value::WithMeta(value, meta) => {
+            tagged("with-meta", Json::Array(vec![write(value), write(meta)]))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,6 +1233,158 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(decode(&encode(&v)).unwrap(), to_plain_json(&v));
+    }
+
+    #[test]
+    fn reads_clojure_types_without_collapsing_them() {
+        use Value as V;
+        let kw = |s: &str| V::Keyword(s.into());
+        // Each fixture is babashka's transit writer output for the form in
+        // the comment.
+        // [:a :ns/b]
+        assert_eq!(
+            read(r#"["~:a","~:ns/b"]"#).unwrap(),
+            V::Vector(vec![kw("a"), kw("ns/b")])
+        );
+        // [f \x \newline]
+        assert_eq!(
+            read(r#"["~$f","~cx","~c\n"]"#).unwrap(),
+            V::Vector(vec![V::Symbol("f".into()), V::Char('x'), V::Char('\n')])
+        );
+        // [1N 12345678901234567890N 1.5M 1/3]
+        assert_eq!(
+            read(r#"["~n1","~n12345678901234567890","~f1.5",["~#ratio",["~n1","~n3"]]]"#).unwrap(),
+            V::Vector(vec![
+                V::BigInt("1".into()),
+                V::BigInt("12345678901234567890".into()),
+                V::BigDec("1.5".into()),
+                V::Ratio {
+                    numerator: "1".into(),
+                    denominator: "3".into()
+                },
+            ])
+        );
+        // [(1 2) #{1} {:a 1, "a" 2} {1 2} {[1] 2}]
+        assert_eq!(
+            read(r#"[["~#list",[1,2]],["~#set",[1]],["^ ","~:a",1,"a",2],["^ ","~i1",2],["~#cmap",[[1],2]]]"#).unwrap(),
+            V::Vector(vec![
+                V::List(vec![V::Int(1), V::Int(2)]),
+                V::Set(vec![V::Int(1)]),
+                V::Map(vec![(kw("a"), V::Int(1)), (V::String("a".into()), V::Int(2))]),
+                V::Map(vec![(V::Int(1), V::Int(2))]),
+                V::Map(vec![(V::Vector(vec![V::Int(1)]), V::Int(2))]),
+            ])
+        );
+        // [(java.net.URI. "http://x") #uuid "550e..." #inst "2026-01-01"]
+        assert_eq!(
+            read(r#"["~rhttp://x","~u550e8400-e29b-41d4-a716-446655440000","~m1767225600000"]"#)
+                .unwrap(),
+            V::Vector(vec![
+                V::Uri("http://x".into()),
+                V::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                V::Inst(1767225600000),
+            ])
+        );
+        // [##Inf ##-Inf 9007199254740993 1.0 (byte-array [1 2])]
+        assert_eq!(
+            read(r#"["~zINF","~z-INF","~i9007199254740993",1.0,"~bAQI="]"#).unwrap(),
+            V::Vector(vec![
+                V::Float(f64::INFINITY),
+                V::Float(f64::NEG_INFINITY),
+                V::Int(9007199254740993),
+                V::Float(1.0),
+                V::Bytes(vec![1, 2]),
+            ])
+        );
+        assert!(matches!(read(r#""~zNaN""#).unwrap(), V::Float(f) if f.is_nan()));
+        assert_eq!(read("null").unwrap(), V::Nil);
+    }
+
+    #[test]
+    fn reads_cache_references_and_with_meta_as_values() {
+        let text =
+            r#"[["^ ","~:name","a"],["^ ","^0","b"],["~#with-meta",[[1],["^ ","~:tag","~:x"]]]]"#;
+        let name = Value::Keyword("name".into());
+        let v = read(text).unwrap();
+        let Value::Vector(items) = &v else {
+            panic!("{v:?}")
+        };
+        assert_eq!(items[1].get(&name), Some(&Value::String("b".into())));
+        assert_eq!(
+            items[2],
+            Value::WithMeta(
+                Box::new(Value::Vector(vec![Value::Int(1)])),
+                Box::new(Value::Map(vec![(
+                    Value::Keyword("tag".into()),
+                    Value::Keyword("x".into())
+                )]))
+            )
+        );
+        assert!(read(r#""~cxy""#).is_err(), "a char is one character");
+        assert!(read(r#"["~#ratio",["~n1",1.5]]"#).is_err());
+    }
+
+    #[test]
+    fn writes_values_that_read_back_unchanged() {
+        use Value as V;
+        let v = V::Vector(vec![
+            V::Keyword("a".into()),
+            V::Symbol("f".into()),
+            V::Char('x'),
+            V::BigInt("12345678901234567890".into()),
+            V::BigDec("1.5".into()),
+            V::Ratio {
+                numerator: "1".into(),
+                denominator: "3".into(),
+            },
+            V::List(vec![V::Int(1)]),
+            V::Set(vec![V::Int(1)]),
+            V::Map(vec![
+                (V::Keyword("a".into()), V::Int(1)),
+                (V::String("a".into()), V::Int(2)),
+            ]),
+            V::Map(vec![(V::Int(1), V::Int(2))]),
+            V::String("~escaped".into()),
+            V::Int(9007199254740993),
+            V::Float(f64::INFINITY),
+            V::Inst(5),
+            V::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            V::Uri("http://x".into()),
+            V::Bytes(vec![0, 255]),
+            V::Tagged(
+                "point".into(),
+                Box::new(V::Vector(vec![V::Int(1), V::Int(2)])),
+            ),
+            V::WithMeta(Box::new(V::Vector(vec![])), Box::new(V::Map(vec![]))),
+            V::Nil,
+        ]);
+        let text = encode(&serde_json::to_value(&v).unwrap());
+        assert_eq!(read(&text).unwrap(), v);
+        assert!(text.contains(r#"["~#ratio",["~n1","~n3"]]"#), "{text}");
+        assert!(text.contains(r#"["~#cmap",[1,2]]"#), "{text}");
+    }
+
+    #[test]
+    fn values_inside_serde_types_and_under_json() {
+        let v = serde_json::to_value(json!({
+            "k": Value::Keyword("a".into()),
+            "s": Value::Set(vec![Value::Char('x')]),
+        }))
+        .unwrap();
+        assert_eq!(encode(&v), r#"["^ ","~:k","~:a","~:s",["~#set",["~cx"]]]"#);
+        assert_eq!(to_plain_json(&v), json!({"k": "a", "s": ["x"]}));
+        assert_eq!(
+            Value::from(&json!({"a": [1, "x", null, 1.5]})),
+            Value::Map(vec![(
+                Value::String("a".into()),
+                Value::Vector(vec![
+                    Value::Int(1),
+                    Value::String("x".into()),
+                    Value::Nil,
+                    Value::Float(1.5)
+                ])
+            )])
+        );
     }
 
     #[test]
