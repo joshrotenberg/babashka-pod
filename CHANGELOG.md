@@ -15,6 +15,10 @@ First release.
 - Per-call cancellation for stream handlers through `CancelToken` and `Emitter::on_cancel`
 - Bounded shutdown grace period for in-flight calls
 
+### Bug Fixes
+
+- Decode a nil argument payload as an empty argument vector, so zero-argument calls work
+
 ### Documentation
 
 - Record why the EDN payload format is not supported
