@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-10-30
+
+### Documentation
+
+- Crates.io, docs.rs, CI and license badges in the README 
+- Update the EDN decision record now that transit::Value exists 
+- Bring the rustdoc up to the README 
+
+
+
 ## [0.1.1] - 2026-10-29
 
 ### Features
