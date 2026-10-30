@@ -245,10 +245,12 @@ worth adding for something transit+json cannot do. Transit already covers it:
 - Custom tags: return a `transit::Tagged` and register a read handler from the pod's `code`, the
   transit equivalent of EDN `readers` (see `examples/transit_pod.rs`).
 - Metadata and `arg-meta`, which the protocol supports for transit only.
+- Clojure types coming in: a var registered with `function_transit`, `stream_transit` or
+  `stream_fn_transit` gets its arguments as `transit::Value`, which keeps keywords, chars, ratios,
+  big numbers, lists and maps with any keys (see "Keeping Clojure types in arguments" above).
 
-EDN would not keep more types on the way in either: arguments decode into `serde_json::Value` in
-any format, which loses keywords, chars, ratios, big numbers and lists. That is tracked in
-[#22](https://github.com/joshrotenberg/babashka-pod/issues/22).
+If EDN is added later, its reader and writer can target `transit::Value`, so the `*_transit`
+handlers would work under it without a new argument model.
 
 It would cost a third format to test across every example and transport, plus a reader. The most
 likely crate, `clojure-reader`, does not read `##Inf`/`##NaN` or `\uXXXX` characters, and reads `^`
