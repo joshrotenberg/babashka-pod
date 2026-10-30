@@ -1,5 +1,10 @@
 # babashka-pod
 
+[![Crates.io](https://img.shields.io/crates/v/babashka-pod.svg)](https://crates.io/crates/babashka-pod)
+[![Documentation](https://docs.rs/babashka-pod/badge.svg)](https://docs.rs/babashka-pod)
+[![CI](https://github.com/joshrotenberg/babashka-pod/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/babashka-pod/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/babashka-pod.svg)](LICENSE-MIT)
+
 A Rust library for writing [babashka pods](https://github.com/babashka/pods).
 
 The crate implements the pod side of the protocol: `describe`, `invoke`, `load-ns` and
