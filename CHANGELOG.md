@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-10-29
+
+### Features
+
+- Filesystem watcher pod on notify 
+- Tree-sitter pod with parse, query and outline 
+- Lossless transit arguments with transit::Value and *_transit registration 
+
+### Refactoring
+
+- Pods as library plus binary, released per pod from their own tags 
+
+
+
 ## [0.1.0] - 2026-10-29
 
 First release.
