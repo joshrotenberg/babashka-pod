@@ -1,0 +1,9 @@
+;; cj project config, written by cj project init. It merges over the built-in
+;; and user cj.edn.
+;;
+;; Uncomment :stop to run the check recipe at the end of every agent turn that
+;; left changes. A failing check blocks the stop until it passes, so turn it
+;; on once cj run check passes here, and mind how long the check takes.
+;; plan-issues lets concurrent changes share the :merge-friendly files.
+{;; :stop {:recipe check :when :dirty}
+ :recipes {plan-issues {:merge-friendly ["CHANGELOG.md" "README.md"]}}}
