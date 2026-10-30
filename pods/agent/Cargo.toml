@@ -1,0 +1,16 @@
+[package]
+name = "pod-agent"
+version = "0.0.0"
+edition = "2024"
+# claude-wrapper and codex-wrapper need 1.90.
+rust-version = "1.90"
+description = "Spike: a babashka pod that runs Claude Code or Codex turns, built on babashka-pod"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+babashka-pod = { path = "../.." }
+claude-wrapper = "0.14.9"
+codex-wrapper = "0.4.7"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }

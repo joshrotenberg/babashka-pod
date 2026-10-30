@@ -1,0 +1,7 @@
+(require '[babashka.pods :as pods])
+(pods/load-pod [(System/getenv "AGENT_POD")])
+(require '[pod.joshrotenberg.agent :as agent])
+(def a (agent/create {:provider :claude :model "haiku" :cwd (System/getProperty "user.dir")}))
+(def turn (agent/tell a "Write a 3000 word essay about forests, marker ZQXJ"))
+(println "waiting on result") (flush)
+(prn (select-keys (agent/result turn) [:status :error]))
