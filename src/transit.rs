@@ -3,7 +3,18 @@
 //! [Transit](https://github.com/cognitect/transit-format) encodes Clojure
 //! values in JSON: keywords, symbols, sets, insts and tagged values that plain
 //! JSON cannot express. This module translates between transit+json text and
-//! [`serde_json::Value`], so handlers keep using ordinary serde types.
+//! two representations:
+//!
+//! - [`serde_json::Value`], so handlers registered with
+//!   [`Namespace::function`](crate::Namespace::function) and the like keep
+//!   using ordinary serde types. Clojure types collapse on the way in.
+//! - [`Value`], which keeps every type transit carries, for handlers
+//!   registered with [`Namespace::function_transit`](crate::Namespace::function_transit),
+//!   [`stream_transit`](crate::Namespace::stream_transit) and
+//!   [`stream_fn_transit`](crate::Namespace::stream_fn_transit). [`read`]
+//!   decodes into it, and it serializes back to the same transit value.
+//!
+//! In more detail:
 //!
 //! - [`decode`] reads what babashka's transit writer produces, including the
 //!   read cache. Keywords and symbols decode to strings, sets and lists to
@@ -53,6 +64,11 @@ impl std::error::Error for DecodeError {}
 // ---------------------------------------------------------------------------
 
 /// Decodes transit+json text into a `serde_json::Value`.
+///
+/// # Errors
+///
+/// Fails when the text is not JSON, refers to a cache entry not seen yet, or
+/// holds a malformed transit value (an odd-length map, a bad scalar).
 pub fn decode(text: &str) -> Result<Json, DecodeError> {
     let json: Json = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
     Reader::new().value(&json)
@@ -782,6 +798,11 @@ fn number(n: &Number) -> Value {
 
 /// Decodes transit+json text into a [`Value`], keeping every type transit
 /// carries.
+///
+/// # Errors
+///
+/// Fails like [`decode`], and also on a char that is not one character or a
+/// ratio of non-integers.
 pub fn read(text: &str) -> Result<Value, DecodeError> {
     let json: Json = serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
     Reader::new().tree(&json)

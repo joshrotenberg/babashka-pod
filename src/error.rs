@@ -39,6 +39,11 @@ impl From<io::Error> for Error {
 /// It is sent to the client as an error reply, which babashka raises as an
 /// `ex-info` with this message and data. Any `std::error::Error` converts into
 /// it, so `?` works inside handlers.
+///
+/// The runtime also replies with a `PodError` when a call's arguments cannot
+/// be decoded (its `ex-data` holds `:var` and `:args`), when the var is
+/// unknown (`:var`), and when a handler panics. The pod keeps serving after
+/// each.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PodError {
     message: String,

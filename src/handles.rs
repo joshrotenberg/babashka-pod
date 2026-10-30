@@ -145,8 +145,10 @@ impl<T> Handles<T> {
 
     /// Runs `f` with the value behind `handle`.
     ///
-    /// Fails with an error reply when the handle is of another kind, or was
-    /// never issued or already removed.
+    /// # Errors
+    ///
+    /// Fails, without running `f`, when the handle is of another kind, or was
+    /// never issued or already removed. Returns `f`'s error if it fails.
     pub fn with<R>(
         &self,
         handle: &Handle,
@@ -158,7 +160,11 @@ impl<T> Handles<T> {
     }
 
     /// Removes the value behind `handle` and drops it once no call is using
-    /// it. Fails like [`with`](Self::with) for a handle it does not hold.
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`with`](Self::with) for a handle it does not hold.
     pub fn remove(&self, handle: &Handle) -> Result<(), PodError> {
         self.check_kind(handle)?;
         self.values()
@@ -176,8 +182,12 @@ impl<T> Handles<T> {
     ///
     /// The value is dropped once no call is using it, as with
     /// [`remove`](Self::remove). The entry is removed even if `f` returns an
-    /// error. Fails like `remove` for a handle it does not hold, without
-    /// running `f`.
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Fails like `remove` for a handle it does not hold, without running `f`.
+    /// Returns `f`'s error if it fails.
     pub fn remove_with<R>(
         &self,
         handle: &Handle,

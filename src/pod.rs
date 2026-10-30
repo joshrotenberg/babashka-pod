@@ -29,12 +29,26 @@ type Handler = Arc<dyn Fn(&str, Format, Emitter) -> Result<Option<Json>, PodErro
 /// encoded inside the bencode messages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Format {
-    /// JSON. babashka keywordizes map keys. Keywords, sets and insts sent by
-    /// babashka arrive as strings, arrays and strings.
+    /// JSON, the default. Keywords, symbols, sets and insts sent by babashka
+    /// arrive as strings, arrays and strings. Return values are written as
+    /// plain JSON: the [`transit`](crate::transit) types degrade to it (a
+    /// keyword to its name, a set to an array). babashka keywordizes map keys.
     #[default]
     Json,
-    /// [Transit](crate::transit) over JSON: keywords, symbols, sets, insts,
-    /// uuids and tagged values survive the round trip in both directions.
+    /// [Transit](crate::transit) over JSON.
+    ///
+    /// Return values can carry keywords, symbols, sets, insts, uuids, tagged
+    /// values and metadata through the [`transit`](crate::transit) types. Map
+    /// keys are written as keywords.
+    ///
+    /// Arguments to [`function`](Namespace::function),
+    /// [`stream`](Namespace::stream) and [`stream_fn`](Namespace::stream_fn)
+    /// are decoded into `serde_json::Value` first, so keywords and symbols
+    /// arrive as strings, sets and lists as arrays, and insts as epoch millis.
+    /// Arguments to the `*_transit` methods, such as
+    /// [`function_transit`](Namespace::function_transit), keep their Clojure
+    /// types as [`transit::Value`](crate::transit::Value)s. Only this format
+    /// supports [`Namespace::arg_meta`].
     TransitJson,
 }
 
@@ -566,6 +580,12 @@ impl Pod {
     ///
     /// In stdin/stdout mode, stdout carries the protocol: anything else printed
     /// to stdout corrupts it. Log to stderr, or use [`Emitter::out`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the socket cannot be bound or accepted, or the
+    /// port file babashka reads cannot be written, and otherwise fails as
+    /// [`run_with`](Self::run_with) does.
     pub fn run(self) -> Result<(), Error> {
         match std::env::var("BABASHKA_POD_TRANSPORT").as_deref() {
             Ok("socket") => self.run_socket(),
@@ -585,8 +605,12 @@ impl Pod {
     /// Serves the pod over an arbitrary reader and writer.
     ///
     /// Returns `Ok` when the reader reaches end of input, the client sends
-    /// `shutdown`, or writing fails because the client went away. Returns an
-    /// error only when the input is not valid bencode or reading fails.
+    /// `shutdown`, or writing fails because the client went away.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] when the input is not valid bencode, and
+    /// [`Error::Io`] when reading fails.
     pub fn run_with<R, W>(self, reader: R, writer: W) -> Result<(), Error>
     where
         R: Read,
@@ -789,7 +813,10 @@ impl Emitter {
 
     /// Sends one value to the client's `:success` handler.
     ///
-    /// Fails once the call has finished or the client has gone away.
+    /// # Errors
+    ///
+    /// Fails when `value` cannot be serialized, once the call has finished, or
+    /// when the client has gone away (which also cancels every call).
     pub fn send<T: Serialize + ?Sized>(&self, value: &T) -> Result<(), PodError> {
         let encoded = self.shared.format.encode(&serde_json::to_value(value)?);
         self.emit(Value::dict([
@@ -799,6 +826,10 @@ impl Emitter {
     }
 
     /// Prints text to the calling script's `*out*`.
+    ///
+    /// # Errors
+    ///
+    /// Fails once the call has finished, or when the client has gone away.
     pub fn out(&self, text: &str) -> Result<(), PodError> {
         self.emit(Value::dict([
             ("id", Value::from(self.id.as_str())),
@@ -807,6 +838,10 @@ impl Emitter {
     }
 
     /// Prints text to the calling script's `*err*`.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`out`](Self::out).
     pub fn err(&self, text: &str) -> Result<(), PodError> {
         self.emit(Value::dict([
             ("id", Value::from(self.id.as_str())),
