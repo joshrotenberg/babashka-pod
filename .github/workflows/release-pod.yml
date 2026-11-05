@@ -61,12 +61,12 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             run-tests: true
           # Built on the arm64 runner; it cannot run x86_64 code without
           # Rosetta, so test.bb is skipped and the header check stands in.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
             run-tests: false
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
