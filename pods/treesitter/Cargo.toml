@@ -10,8 +10,9 @@ publish = false
 
 # The pod-registry manifest written by `bb manifest` (see release/).
 [package.metadata.pod-registry]
-name = "joshrotenberg/pod-treesitter"
+name = "joshrotenberg/treesitter"
 description = "Parse source code with tree-sitter: syntax trees, queries, and outlines of definitions"
+example = "examples/joshrotenberg_treesitter.clj"
 
 [features]
 default = ["clojure", "go", "javascript", "python", "rust", "typescript"]

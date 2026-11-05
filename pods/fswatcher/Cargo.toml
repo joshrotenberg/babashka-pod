@@ -9,8 +9,9 @@ publish = false
 
 # The pod-registry manifest written by `bb manifest` (see release/).
 [package.metadata.pod-registry]
-name = "joshrotenberg/pod-fswatcher"
+name = "joshrotenberg/fswatcher"
 description = "Watch files, built on notify; a drop-in for org.babashka/fswatcher"
+example = "examples/joshrotenberg_fswatcher.clj"
 
 [dependencies]
 babashka-pod = { path = "../.." }

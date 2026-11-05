@@ -66,7 +66,8 @@
   (with-out-str
     (r/manifest {:pod "sqlite" :version "9.9.9" :dist (str dist)
                  :base-url "https://example.com/releases/download/pod-sqlite-v9.9.9/"
-                 :name "joshrotenberg/pod-sqlite" :description "test"})))
+                 :name "joshrotenberg/sqlite" :description "test"
+                 :example "examples/test.clj"})))
 
 (deftest manifest-from-checked-zips
   (let [dist (fs/create-temp-dir)]
@@ -77,7 +78,8 @@
     (fake-zip dist "windows-amd64" "pod-sqlite.exe" pe-x86_64)
     (run-manifest dist)
     (let [m (edn/read-string (slurp (str (fs/path dist "manifest.edn"))))]
-      (is (= 'joshrotenberg/pod-sqlite (:pod/name m)))
+      (is (= 'joshrotenberg/sqlite (:pod/name m)))
+      (is (= "examples/test.clj" (:pod/example m)))
       (is (= "9.9.9" (:pod/version m)))
       (is (= [["Linux.*" "amd64"] ["Linux.*" "aarch64"] ["Mac.*" "aarch64"]
               ["Mac.*" "x86_64"] ["Windows.*" "amd64"]]
@@ -96,7 +98,21 @@
     (let [m (edn/read-string (slurp (str (fs/path dist "manifest.edn"))))]
       (is (= (symbol (:registry-name info)) (:pod/name m)))
       (is (= (:version info) (:pod/version m)))
-      (is (= (:description info) (:pod/description m))))))
+      (is (= (:description info) (:pod/description m)))
+      (is (some? (:example info)))
+      (is (= (:example info) (:pod/example m))))))
+
+(deftest manifest-leaves-out-an-unset-example
+  (let [dist (fs/create-temp-dir)]
+    (fake-zip dist "linux-amd64" "pod-sqlite" elf-x86_64)
+    (with-redefs [r/pod-info (fn [pod] {:pod pod :crate (str "pod-" pod) :version "9.9.9"
+                                        :registry-name "joshrotenberg/sqlite" :description "test"})]
+      (with-out-str
+        (r/manifest {:pod "sqlite" :dist (str dist) :base-url "https://example.com/dl/"})))
+    (let [m (edn/read-string (slurp (str (fs/path dist "manifest.edn"))))]
+      (is (= 'joshrotenberg/sqlite (:pod/name m)))
+      (is (not (contains? m :pod/example))))
+    (fs/delete-tree dist)))
 
 (deftest manifest-refuses-a-mislabeled-binary
   (testing "an x86_64 binary filed as macos-aarch64, as in fswatcher 0.0.5"
@@ -139,11 +155,12 @@
                         (r/toml-strings "[s]\nd = \"\\q\"\n"))))
 
 (deftest reads-pod-info-from-the-workspace
-  (doseq [pod ["sqlite" "fswatcher"]]
+  (doseq [pod ["sqlite" "fswatcher" "treesitter"]]
     (let [info (r/pod-info pod)]
       (is (= (str "pod-" pod) (:crate info)))
-      (is (= (str "joshrotenberg/pod-" pod) (:registry-name info)))
-      (is (string? (:description info)))))
+      (is (= (str "joshrotenberg/" pod) (:registry-name info)))
+      (is (string? (:description info)))
+      (is (= (str "examples/joshrotenberg_" pod ".clj") (:example info)))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no pod nope" (r/pod-info "nope"))))
 
 (deftest parses-release-tags

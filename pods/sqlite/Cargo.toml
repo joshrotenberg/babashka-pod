@@ -9,8 +9,9 @@ publish = false
 
 # The pod-registry manifest written by `bb manifest` (see release/).
 [package.metadata.pod-registry]
-name = "joshrotenberg/pod-sqlite"
+name = "joshrotenberg/sqlite"
 description = "SQLite, built on rusqlite with SQLite compiled in"
+example = "examples/joshrotenberg_sqlite.clj"
 
 [dependencies]
 babashka-pod = { path = "../.." }
