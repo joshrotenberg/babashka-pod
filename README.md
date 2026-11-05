@@ -281,7 +281,7 @@ to crates.io; its package does not include `pods/`. Each pod is a workspace memb
 | Binary | `pod-<name>`: `src/main.rs` serves `namespace()` with `Format::TransitJson` and does nothing else |
 | Format | `Format::TransitJson` for every pod, so any set of them can be served by one `Pod` |
 | Tests | `test.bb` loads the binary named by `<NAME>_POD` (for example `SQLITE_POD`) and prints one line per check; `tests/bb.rs` runs it over stdio and socket and asserts on the lines |
-| Registry entry | `[package.metadata.pod-registry]` in the pod's `Cargo.toml`: `name` (`:pod/name`) and `description` (`:pod/description`) |
+| Registry entry | `[package.metadata.pod-registry]` in the pod's `Cargo.toml`: `name` (`:pod/name`, `joshrotenberg/<name>` without the `pod-` prefix, matching the `pod.joshrotenberg.<name>` namespace convention), `description` (`:pod/description`), and optionally `example` (`:pod/example`, the example script's path in the pod-registry repo, `examples/joshrotenberg_<name>.clj`) |
 
 Because each pod is a library, a pod binary can serve several of them:
 
@@ -339,7 +339,7 @@ release assets to be public.
 | `bb check-version <tag>` | The same check, printing a message |
 | `bb arch <file>` | Reads a binary's Mach-O, ELF, or PE header and prints the OS and CPU it was built for |
 | `bb package --pod <name> --target <triple>` | Zips `target/<triple>/release/pod-<name>[.exe]` as `dist/pod-<name>-<version>-<os>-<arch>.zip` with a `.sha256`, after checking the header matches the target |
-| `bb manifest --pod <name> --base-url <url>` | Writes `dist/manifest.edn` in the pod-registry format from that pod's zips in `dist/`, opening each one and checking the binary's header against its `:os/name` and `:os/arch`; refuses on a mismatch |
+| `bb manifest --pod <name> --base-url <url>` | Writes `dist/manifest.edn` in the pod-registry format from that pod's zips in `dist/`, opening each one and checking the binary's header against its `:os/name` and `:os/arch`; refuses on a mismatch. `:pod/name`, `:pod/description` and `:pod/example` come from the registry entry unless `--name`, `--description` or `--example` is given |
 | `bb release-test` | Tests for the above (CI runs it) |
 
 The registry matches `:os/arch` against babashka's `os.arch`: `aarch64` or `x86_64` on macOS,

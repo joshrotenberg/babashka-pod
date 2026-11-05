@@ -148,9 +148,9 @@
 
 (defn pod-info
   "What the release tooling needs from pods/<pod>/Cargo.toml: the crate
-  name (which must be pod-<pod>), version, and pod-registry name and
-  description from [package.metadata.pod-registry]. The description falls
-  back to the package description."
+  name (which must be pod-<pod>), version, and pod-registry name,
+  description and example from [package.metadata.pod-registry]. The
+  description falls back to the package description; example is optional."
   [pod]
   (let [path (fs/path "pods" pod "Cargo.toml")
         _    (when-not (fs/exists? path)
@@ -169,7 +169,8 @@
      :crate         crate
      :version       (get pkg "version")
      :registry-name (get reg "name")
-     :description   (or (get reg "description") (get pkg "description"))}))
+     :description   (or (get reg "description") (get pkg "description"))
+     :example       (get reg "example")}))
 
 (defn crate-version
   "The [package] version in pods/<pod>/Cargo.toml."
@@ -268,16 +269,18 @@
                              :base-url    {:desc "Release download URL prefix, e.g. https://github.com/<owner>/<repo>/releases/download/<tag>"}
                              :name        {:desc "Registry name, :pod/name. Defaults to name in [package.metadata.pod-registry]"}
                              :description {:desc ":pod/description. Defaults to description in [package.metadata.pod-registry], then [package]"}
+                             :example     {:desc ":pod/example, a path or URL to an example script. Defaults to example in [package.metadata.pod-registry]; left out when neither is set"}
                              :dist        {:default "dist" :desc "Directory with the zips; manifest.edn is written here"}}}}
-  [{:keys [pod version base-url name description dist]}]
+  [{:keys [pod version base-url name description example dist]}]
   (when-not (and pod base-url)
     (throw (ex-info "--pod and --base-url are required" {:babashka/exit 1})))
-  (let [info        (when-not (and version name description) (pod-info pod))
+  (let [info        (when-not (and version name description example) (pod-info pod))
         version     (or version (:version info))
         name        (or name (:registry-name info)
                         (throw (ex-info (str "no --name, and no name in [package.metadata.pod-registry] of pods/" pod "/Cargo.toml")
                                         {:babashka/exit 1})))
         description (or description (:description info))
+        example     (or example (:example info))
         prefix   (format "pod-%s-%s-" pod version)
         zips     (->> (fs/glob dist (str prefix "*.zip")) (map str) sort)
         checked  (for [zip zips
@@ -313,6 +316,7 @@
       (spit (str out)
             (str "{:pod/name " name "\n"
                  " :pod/description " (pr-str description) "\n"
+                 (when example (str " :pod/example " (pr-str example) "\n"))
                  " :pod/version " (pr-str version) "\n"
                  " :pod/license \"MIT OR Apache-2.0\"\n"
                  " :pod/language \"rust\"\n"
