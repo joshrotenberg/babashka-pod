@@ -56,7 +56,7 @@ fn main() -> Result<(), babashka_pod::Error> {
 | Method | Client sees | Notes |
 |---|---|---|
 | `function(name, Fn(A) -> Result<R, PodError>)` | a function returning one value | `A` is deserialized from the argument vector: `(T,)` for one argument, `(T, U)` for two, `NoArgs` for none, `Vec<T>` for variadic. `R` is serialized as JSON. |
-| `stream_fn(name, Fn(A, Emitter) -> Result<(), PodError>)` | `(name arg ... callback)`: calls `callback` with each value, blocks until done, returns `nil`, rethrows pod errors as `ex-info` | Registers the raw var `name*` plus a `name` var whose client code the crate generates. `Emitter` can be cloned and moved to other threads. |
+| `stream_fn(name, Fn(A, Emitter) -> Result<(), PodError>)` | `(name arg ... callback)`: calls `callback` with each value on the calling thread, blocks until done, returns `nil`, rethrows pod errors as `ex-info`. The callback can call the pod; if it throws, later values are dropped and the exception is rethrown | Registers the raw var `name*` plus a `name` var whose client code the crate generates. `Emitter` can be cloned and moved to other threads. |
 | `stream(name, Fn(A, Emitter) -> Result<(), PodError>)` | values delivered to `:success` handlers | The raw form: pair it with client `code` that calls `babashka.pods/invoke` with `:handlers`. |
 | `code(name, source)` | a var defined by Clojure code evaluated in babashka | For idiomatic wrappers around raw pod functions. |
 | `doc(name, text)`, `arglists(name, ["[a b]", ...])` | `:doc` and `:arglists` metadata | Escaped by the crate. On a `stream_fn` they go into the generated `defn`. |

@@ -31,6 +31,18 @@
   (ex/count-up 5 #(swap! seen conj %))
   (println "count-up:" @seen))
 
+;; A pod call inside the callback. The callback runs on the calling thread,
+;; not babashka's pod reader thread, so this does not deadlock.
+(let [seen (atom [])
+      done (future (ex/count-up 2 (fn [i] (swap! seen conj [i (ex/ping)]))))]
+  (println "count-up nested:" (deref done 5000 :timeout) @seen))
+
+(try
+  (ex/count-up 5 (fn [i] (when (= i 1) (throw (ex-info "callback failed" {:at i})))))
+  (catch clojure.lang.ExceptionInfo e
+    (println "callback error:" (ex-message e) (ex-data e))))
+(println "after callback error:" (ex/ping))
+
 (println "stream doc:" (:doc (meta #'ex/count-up)))
 (try
   (ex/count-up "x" identity)
