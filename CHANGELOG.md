@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-11-06
+
+### Bug Fixes
+
+- Run stream_fn callbacks on the calling thread 
+
+### Documentation
+
+- Crates.io, docs.rs, CI and license badges in the README 
+- Update the EDN decision record now that transit::Value exists 
+- Bring the rustdoc up to the README 
+
+### Features
+
+- Pod-registry names without the pod- prefix, and :pod/example in bb manifest 
+
+### Miscellaneous
+
+- Pod-sqlite and pod-fswatcher 0.1.1 
+
+
+
 ## [0.1.1] - 2026-10-29
 
 ### Features
