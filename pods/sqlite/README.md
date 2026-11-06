@@ -2,8 +2,9 @@
 
 A [babashka](https://babashka.org) pod for SQLite, built on [babashka-pod](../../README.md) and
 [rusqlite](https://github.com/rusqlite/rusqlite) with SQLite compiled in (3.53.2 at the time of
-writing, with FTS5, JSON functions and R*Tree). SQLite is compiled from source with the platform's
-C compiler, so the pod builds natively on each platform, including macOS arm64.
+writing, with FTS5, JSON functions, R*Tree and math functions). SQLite is compiled from source
+with the platform's C compiler, so the pod builds natively on each platform, including macOS
+arm64.
 
 ```bash
 cargo build --release -p pod-sqlite
@@ -56,8 +57,20 @@ Each function has a docstring: `(clojure.repl/doc sql/query)`.
 | BLOB | byte array |
 | NULL | nil |
 
-Parameters map the other way. Booleans bind as 0 and 1. Maps and vectors bind as JSON text, so
-SQLite's JSON functions can query them:
+Parameters map the other way. Other parameter types:
+
+| babashka | Stored as |
+|---|---|
+| boolean | INTEGER 0 or 1 |
+| `#inst` | INTEGER, epoch milliseconds |
+| `#uuid` | TEXT |
+| keyword | TEXT, without the colon |
+| bigdec (`1.5M`) | TEXT (`"1.5"`) |
+| map, vector | TEXT, JSON |
+| set | TEXT, JSON array |
+
+Values read back as the SQLite type: an `#inst` comes back as a long. Maps and vectors bind as
+JSON text, so SQLite's JSON functions can query them:
 
 ```clojure
 (sql/execute! db "update users set meta = ? where id = 1" [{:roles ["admin"] :level 3}])

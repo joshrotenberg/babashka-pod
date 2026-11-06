@@ -1,5 +1,6 @@
 //! A babashka pod for SQLite, built on `babashka-pod` and rusqlite with
-//! bundled SQLite (FTS5, JSON functions and R*Tree compiled in).
+//! bundled SQLite (FTS5, JSON functions, R*Tree and math functions compiled
+//! in).
 //!
 //! The `pod-sqlite` binary serves [`namespace`] on its own. Another pod can
 //! serve it next to other namespaces:

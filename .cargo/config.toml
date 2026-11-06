@@ -1,0 +1,5 @@
+[env]
+# Extra compile-time options for the SQLite that libsqlite3-sys bundles into
+# pod-sqlite (rusqlite "bundled"). SQLite's math functions (sqrt, ln, pow, ...)
+# are off by default.
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS"
