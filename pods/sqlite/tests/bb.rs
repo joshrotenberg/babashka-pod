@@ -47,6 +47,7 @@ fn check(stdout: &str) {
         "json: [{:level 3, :roles 2}]",
         "blob: [true [0 1 2 -1]]",
         r#"fts5: ("pods" "rust")"#,
+        "math: [{:p 1024.0, :r 4.0}]",
         "rtree: [{:id 1}]",
         r#"prepared: [[{:name "ada"}] [{:name "bob"}]]"#,
         r#"finalized: "unknown or closed statement handle 1""#,

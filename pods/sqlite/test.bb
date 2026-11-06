@@ -66,6 +66,9 @@
                     ["rust" "a systems language for fast native pods"]])
 (check "fts5" (map :title (sql/query db "select title from docs where docs match ? order by rank" ["pods"])))
 
+;; Math functions (SQLITE_ENABLE_MATH_FUNCTIONS, set in .cargo/config.toml).
+(check "math" (sql/query db "select sqrt(16) as r, pow(2, 10) as p"))
+
 ;; R*Tree.
 (sql/execute-batch! db "create virtual table boxes using rtree(id, minx, maxx, miny, maxy)")
 (sql/execute-many! db "insert into boxes values (?, ?, ?, ?, ?)" [[1 0 10 0 10] [2 20 30 20 30]])
