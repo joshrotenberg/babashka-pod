@@ -44,7 +44,7 @@
 //! | Method | Client sees |
 //! |---|---|
 //! | [`function`](Namespace::function) | a function returning one value |
-//! | [`stream_fn`](Namespace::stream_fn) | `(name arg ... callback)`: calls `callback` with each value, blocks until done, returns `nil`, rethrows pod errors as `ex-info` |
+//! | [`stream_fn`](Namespace::stream_fn) | `(name arg ... callback)`: calls `callback` with each value on the calling thread, blocks until done, returns `nil`, rethrows pod errors as `ex-info`. The callback can call the pod; if it throws, later values are dropped and the exception is rethrown |
 //! | [`stream`](Namespace::stream) | values delivered to `:success` handlers; pair it with client [`code`](Namespace::code) that calls `babashka.pods/invoke` |
 //! | [`function_transit`](Namespace::function_transit), [`stream_transit`](Namespace::stream_transit), [`stream_fn_transit`](Namespace::stream_fn_transit) | the same, with arguments that keep their Clojure types (see [Payload formats](#payload-formats)) |
 //! | [`code`](Namespace::code) | a var defined by Clojure code evaluated in babashka |
