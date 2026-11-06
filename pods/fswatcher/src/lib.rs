@@ -50,16 +50,35 @@ const WATCH: &str = r#"(defn watch
   ([path callback]
    (watch path callback {}))
   ([path callback opts]
-   (let [ret (pod.babashka.fswatcher/-create-watcher path opts)]
+   ;; babashka runs :handlers on the pod reader thread, where a call to this
+   ;; pod would wait for a reply only that thread can read. The handlers only
+   ;; queue; a daemon thread per watcher runs the callback, and stops on :done
+   ;; (after unwatch or shutdown).
+   (let [ret (pod.babashka.fswatcher/-create-watcher path opts)
+         queue (java.util.concurrent.LinkedBlockingQueue.)
+         deliver-events (bound-fn []
+                          (loop []
+                            (let [[kind x] (.take queue)]
+                              (when (= :event kind)
+                                (try
+                                  (callback (update x :type keyword))
+                                  (catch Throwable t
+                                    (binding [*out* *err*]
+                                      (println "ERROR in watch callback:" (ex-message t)))))
+                                (recur)))))]
+     (doto (Thread. ^Runnable deliver-events "pod.babashka.fswatcher/watch")
+       (.setDaemon true)
+       (.start))
      (babashka.pods/invoke
       "pod.babashka.fswatcher"
       'pod.babashka.fswatcher/-start-watcher
       [(:watcher/id ret)]
-      {:handlers {:success (fn [event]
-                             (callback (update event :type keyword)))
+      {:handlers {:success (fn [event] (.put queue [:event event]))
                   :error (fn [{:keys [ex-message]}]
                            (binding [*out* *err*]
-                             (println "ERROR:" ex-message)))}})
+                             (println "ERROR:" ex-message))
+                           (.put queue [:done]))
+                  :done (fn [] (.put queue [:done]))}})
      ret)))"#;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

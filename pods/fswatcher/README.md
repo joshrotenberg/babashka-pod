@@ -25,7 +25,7 @@ All functions are in `pod.babashka.fswatcher`.
 
 | Function | Does |
 |---|---|
-| `(watch path callback)`, `(watch path callback opts)` | Watches `path` (a directory or a file) and calls `callback` with each event. Returns `{:watcher/id n}` |
+| `(watch path callback)`, `(watch path callback opts)` | Watches `path` (a directory or a file) and calls `callback` with each event, on a thread of its own per watcher, so the callback can call `unwatch` or `watch`. A callback that throws is reported on stderr and the watcher keeps going. Returns `{:watcher/id n}` |
 | `(unwatch watcher)` | Stops the watcher and returns its argument. Unknown or already stopped watchers are ignored |
 
 | Option | Default | Meaning |
@@ -82,3 +82,8 @@ Released from this repository with the tag `pod-fswatcher-v<version>`; see
 and sends each one with the `Emitter`. `unwatch` sends the handler a stop message, and the pod
 shutting down cancels it; either way the handler returns, the call completes with `done`, and the
 notify watcher is dropped.
+
+On the client, the `:handlers` only put events on a queue. babashka runs handlers on the pod's
+reader thread, so a callback running there could not make a pod call: the call would wait for a
+reply only that thread can read. A daemon thread per watcher takes from the queue and runs the
+callback, and ends on `done`.
