@@ -156,8 +156,25 @@ fn row_value(row: &Row<'_>, names: &[String]) -> Result<Value, rusqlite::Error> 
     Ok(Value::Object(map))
 }
 
-fn column_names(stmt: &Statement<'_>) -> Vec<String> {
-    stmt.column_names().into_iter().map(String::from).collect()
+/// The result's column names, which become the row maps' keys. Two columns
+/// with one name would collapse into one key, so that is an error.
+fn column_names(stmt: &Statement<'_>, sql: &str) -> Result<Vec<String>, PodError> {
+    let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut dups: Vec<&str> = Vec::new();
+    for name in &names {
+        if !seen.insert(name.as_str()) && !dups.contains(&name.as_str()) {
+            dups.push(name);
+        }
+    }
+    if dups.is_empty() {
+        return Ok(names);
+    }
+    Err(PodError::new(format!(
+        "duplicate column names {}; give them distinct names with AS",
+        dups.join(", ")
+    ))
+    .with_data(json!({ "sql": sql, "columns": dups })))
 }
 
 impl Db {
@@ -219,7 +236,7 @@ impl Db {
         self.conns.with(&conn, |c| {
             let mut stmt = c.prepare_cached(&sql).map_err(sql_error(&sql))?;
             bind(&mut stmt, &params, &sql)?;
-            let names = column_names(&stmt);
+            let names = column_names(&stmt, &sql)?;
             let mut rows = stmt.raw_query();
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(sql_error(&sql))? {
@@ -234,7 +251,7 @@ impl Db {
         self.conns.with(&conn, |c| {
             let mut stmt = c.prepare_cached(&sql).map_err(sql_error(&sql))?;
             bind(&mut stmt, &params, &sql)?;
-            let names = column_names(&stmt);
+            let names = column_names(&stmt, &sql)?;
             let mut rows = stmt.raw_query();
             while let Some(row) = rows.next().map_err(sql_error(&sql))? {
                 tx.send(&row_value(row, &names).map_err(sql_error(&sql))?)?;

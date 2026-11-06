@@ -44,6 +44,10 @@ All functions are in `pod.joshrotenberg.sqlite`. Connections and statements are 
 `params` is a vector for positional `?` parameters, or a map for named ones: `{:name "ada"}`
 binds `:name`.
 
+Rows are maps keyed by column name, so `query` and `query-stream` throw when a result has two
+columns with the same name (`select a.id, b.id ...`), with `:columns` in `ex-data`. Alias them
+with `AS`.
+
 Each function has a docstring: `(clojure.repl/doc sql/query)`.
 
 ## Values

@@ -83,6 +83,14 @@
   (sql/query-stream db "select id from logs" (fn [_] (swap! seen inc)))
   (check "stream" @seen))
 
+;; Duplicate column names would collapse into one key.
+(sql/execute-batch! db "create table owners (id integer primary key, user_id integer); insert into owners (id, user_id) values (7, 1)")
+(check "duplicate columns" (try (sql/query db "select users.id, owners.id from users join owners on owners.user_id = users.id")
+                                (catch clojure.lang.ExceptionInfo e [(ex-message e) (:columns (ex-data e))])))
+(check "aliased columns" (sql/query db "select users.id as user_id, owners.id as owner_id from users join owners on owners.user_id = users.id"))
+(check "duplicate columns stream" (try (sql/query-stream db "select 1 as a, 2 as a" identity)
+                                       (catch clojure.lang.ExceptionInfo e (ex-message e))))
+
 ;; CSV as a table.
 (let [csv (str (fs/create-temp-file {:suffix ".csv"}))]
   (spit csv "task,seconds\nlint,0.2\ntest,0.6\njvm,4.1\n")
