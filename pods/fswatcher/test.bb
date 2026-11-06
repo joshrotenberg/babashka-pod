@@ -55,6 +55,41 @@
 (check "events after unwatch" (filterv #(= "<dir>/b.txt" (:path %)) @deduped))
 (check "second watcher saw b.txt" (boolean (some #(= "<dir>/b.txt" (:path %)) @all-events)))
 
+;; A pod call from inside a callback: the callback runs on its own thread, not
+;; babashka's pod reader thread, so unwatch returns.
+(def w3 (promise))
+(def w3-paths (atom []))
+(def self-unwatch (promise))
+(deliver w3 (fw/watch tmp (fn [e]
+                            (swap! w3-paths conj (:path (rel e)))
+                            (deliver self-unwatch (fw/unwatch @w3)))
+                      {:dedup false}))
+(Thread/sleep 300)
+(spit (str tmp "/c.txt") "unwatch from the callback")
+(check "unwatch in callback" (deref self-unwatch 5000 :timeout))
+(spit (str tmp "/d.txt") "after unwatch in callback")
+(Thread/sleep 500)
+(check "events after unwatch in callback" (filterv #(= "<dir>/d.txt" %) @w3-paths))
+
+;; A callback that throws does not stop the watcher.
+(def w4-paths (atom []))
+(def w4 (fw/watch tmp (fn [e]
+                        (swap! w4-paths conj (:path (rel e)))
+                        (throw (ex-info "callback failed" {})))
+                  {:delay-ms 50}))
+(Thread/sleep 300)
+(spit (str tmp "/e.txt") "first")
+(Thread/sleep 300)
+(spit (str tmp "/f.txt") "second")
+(Thread/sleep 500)
+(fw/unwatch w4)
+(check "throwing callback saw" (filterv #{"<dir>/e.txt" "<dir>/f.txt"} @w4-paths))
+
+;; Each watcher's callback thread ends after unwatch; only w2's is left.
+(Thread/sleep 200)
+(check "callback threads" (count (filter #(and (= "pod.babashka.fswatcher/watch" (.getName %)) (.isAlive %))
+                                         (keys (Thread/getAllStackTraces)))))
+
 (check "missing path" (try (fw/watch (str tmp "/nope") prn)
                            (catch clojure.lang.ExceptionInfo e
                              (str/replace (ex-message e) tmp "<dir>"))))
